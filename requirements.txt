@@ -1,0 +1,5 @@
+discord.py
+firebase-admin
+yt-dlp
+python-dotenv
+PyNaCl
