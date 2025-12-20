@@ -1,5 +1,5 @@
 discord.py==2.4.0
+PyNaCl
+yt-dlp
 firebase-admin
-yt-dlp==2025.1.15
 python-dotenv
-PyNaCl==1.5.0
