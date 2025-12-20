@@ -59,6 +59,22 @@ async def connect_voice(member):
     return vc
 
 # =======================
+# 볼륨
+# =======================
+def volume_ref(guild_id):
+    return team_ref(guild_id, "state").document("volume")
+
+def get_volume(guild_id):
+    doc = volume_ref(guild_id).get()
+    if not doc.exists:
+        volume_ref(guild_id).set({"value": 0.5})
+        return 0.5
+    return doc.to_dict().get("value", 0.5)
+
+def set_volume(guild_id, value):
+    volume_ref(guild_id).set({"value": value})
+
+# =======================
 # 오디오
 # =======================
 YDL_OPTS = {
@@ -75,7 +91,7 @@ FFMPEG_BEFORE = (
     "-reconnect_delay_max 5"
 )
 
-async def play_youtube(member, url, start, duration):
+async def play_youtube(member, url, start, duration, order=None):
     vc = await connect_voice(member)
     if vc is None:
         return
@@ -87,21 +103,27 @@ async def play_youtube(member, url, start, duration):
         info = ydl.extract_info(url, download=False)
         audio_url = info["url"]
 
-    vc.play(
+    source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(
-        audio_url,
-        executable="ffmpeg",
-        before_options=f"{FFMPEG_BEFORE} -ss {start}",
-        options=f"-t {duration} -vn"
-        )
+            audio_url,
+            executable="ffmpeg",
+            before_options=f"{FFMPEG_BEFORE} -ss {start}",
+            options=f"-t {duration} -vn"
+        ),
+        volume=get_volume(member.guild.id)
     )
 
-async def play_song(member, name):
+    vc.play(source)
+
+    if order is not None:
+        game_state(member.guild.id).update({"currentOrder": order})
+
+async def play_song(member, name, order):
     doc = team_ref(member.guild.id, "entranceSongs").document(name).get()
     if not doc.exists:
         return
     d = doc.to_dict()
-    await play_youtube(member, d["url"], d["start"], d["end"] - d["start"])
+    await play_youtube(member, d["url"], d["start"], d["end"] - d["start"], order)
 
 async def preview_song(member, name):
     doc = team_ref(member.guild.id, "entranceSongs").document(name).get()
@@ -119,7 +141,11 @@ async def play_event(member, key):
     if vc and os.path.exists(path):
         if vc.is_playing():
             vc.stop()
-        vc.play(discord.FFmpegPCMAudio(path))
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(path),
+            volume=get_volume(member.guild.id)
+        )
+        vc.play(source)
 
 async def stop_audio(member):
     vc = member.guild.voice_client
@@ -163,6 +189,19 @@ async def set_team(ctx, team: str):
     await ctx.send(f"✅ 현재 팀: {team}")
 
 # =======================
+# 볼륨 명령어
+# =======================
+@bot.command(name="볼륨")
+async def volume(ctx, value: int):
+    if not is_admin(ctx):
+        return
+    if value < 0 or value > 100:
+        await ctx.send("❌ 0~100 사이로 입력하세요")
+        return
+    set_volume(ctx.guild.id, value / 100)
+    await ctx.send(f"🔊 볼륨 {value}%")
+
+# =======================
 # 등장곡 저장 / 변경 / 미리듣기
 # =======================
 def parse_song(args):
@@ -179,19 +218,25 @@ def parse_song(args):
 
 @bot.command(name="저장")
 async def save(ctx, *, args):
-    if not is_admin(ctx): return
+    if not is_admin(ctx):
+        return
     n, u, s, e = parse_song(args)
     team_ref(ctx.guild.id, "entranceSongs").document(n).set({
-        "url": u, "start": s, "end": e
+        "url": u,
+        "start": s,
+        "end": e
     })
     await refresh_lineup(ctx)
 
 @bot.command(name="변경")
 async def change(ctx, *, args):
-    if not is_admin(ctx): return
+    if not is_admin(ctx):
+        return
     n, u, s, e = parse_song(args)
     team_ref(ctx.guild.id, "entranceSongs").document(n).set({
-        "url": u, "start": s, "end": e
+        "url": u,
+        "start": s,
+        "end": e
     }, merge=True)
     await refresh_lineup(ctx)
 
@@ -204,7 +249,8 @@ async def preview(ctx, name: str):
 # =======================
 @bot.command(name="타순")
 async def set_order(ctx, num: int, *, args):
-    if not is_admin(ctx): return
+    if not is_admin(ctx):
+        return
     _, name = args.split("/", 1)
     team_ref(ctx.guild.id, "lineup").document(str(num)).set({
         "name": name.strip()
@@ -213,14 +259,16 @@ async def set_order(ctx, num: int, *, args):
 
 @bot.command(name="타순삭제")
 async def del_order(ctx, num: int):
-    if not is_admin(ctx): return
+    if not is_admin(ctx):
+        return
     team_ref(ctx.guild.id, "lineup").document(str(num)).delete()
     await refresh_lineup(ctx)
 
 @bot.command(name="교체")
 async def change_player(ctx, num: int, *, args):
-    if not is_admin(ctx): return
-    _, _, new = args.split("/", 2)
+    if not is_admin(ctx):
+        return
+    _, new = args.split("/", 1)
     team_ref(ctx.guild.id, "lineup").document(str(num)).set({
         "name": new.strip()
     })
@@ -231,7 +279,8 @@ async def change_player(ctx, num: int, *, args):
 # =======================
 @bot.command(name="이벤트저장")
 async def save_event(ctx, key: str, filename: str):
-    if not is_admin(ctx): return
+    if not is_admin(ctx):
+        return
     team_ref(ctx.guild.id, "events").document(key).set({
         "file": filename
     })
@@ -253,7 +302,8 @@ class Control(discord.ui.Button):
             order = int(self.action.replace("num", ""))
             doc = team_ref(gid, "lineup").document(str(order)).get()
             if doc.exists:
-                await play_song(m, doc.to_dict()["name"])
+                await play_song(m, doc.to_dict()["name"], order)
+                await refresh_lineup(interaction)
             return
 
         if self.action == "stop":
@@ -266,10 +316,10 @@ class Control(discord.ui.Button):
             st = game_state(gid)
             cur = st.get().to_dict()["currentOrder"]
             nxt = cur + 1 if cur < 9 else 1
-            st.update({"currentOrder": nxt})
             doc = team_ref(gid, "lineup").document(str(nxt)).get()
             if doc.exists:
-                await play_song(m, doc.to_dict()["name"])
+                await play_song(m, doc.to_dict()["name"], nxt)
+                await refresh_lineup(interaction)
 
 class LineupView(discord.ui.View):
     def __init__(self):
@@ -288,7 +338,11 @@ class LineupView(discord.ui.View):
 # 라인업
 # =======================
 async def build_lineup(ctx):
-    embed = discord.Embed(title=f"⚾ {get_team(ctx.guild.id)} 라인업")
+    st = game_state(ctx.guild.id).get().to_dict()
+    cur = st.get("currentOrder", 1)
+    embed = discord.Embed(
+        title=f"⚾ {get_team(ctx.guild.id)} 라인업 (현재 타순: {cur}번)"
+    )
     for i in range(1, 10):
         d = team_ref(ctx.guild.id, "lineup").document(str(i)).get()
         embed.add_field(
@@ -317,4 +371,3 @@ async def lineup(ctx):
 # RUN
 # =======================
 bot.run(TOKEN)
-
