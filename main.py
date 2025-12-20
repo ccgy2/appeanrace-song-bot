@@ -15,9 +15,9 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 FIREBASE_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT")
 
 if not TOKEN:
-    raise ValueError("DISCORD_TOKEN 없음")
+    raise RuntimeError("DISCORD_TOKEN 없음")
 if not FIREBASE_JSON:
-    raise ValueError("FIREBASE_SERVICE_ACCOUNT 없음")
+    raise RuntimeError("FIREBASE_SERVICE_ACCOUNT 없음")
 
 # ======================================================
 # Firebase
@@ -35,22 +35,10 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ======================================================
-# ffmpeg (Railway용 탐색)
-# ======================================================
-def find_ffmpeg():
-    for root, _, files in os.walk("/nix/store"):
-        if "ffmpeg" in files:
-            return os.path.join(root, "ffmpeg")
-    return "ffmpeg"
-
-FFMPEG_EXEC = find_ffmpeg()
-print("🎬 ffmpeg:", FFMPEG_EXEC)
-
-# ======================================================
 # 서버 상태
 # ======================================================
-current_team = {}       # guild_id -> team
-lineup_message = {}     # guild_id -> lineup message
+current_team = {}        # guild_id -> team
+lineup_message = {}      # guild_id -> message
 
 def get_team(guild_id):
     return current_team.get(guild_id, "A팀")
@@ -66,20 +54,23 @@ def is_admin(ctx):
 
 async def connect_voice(member):
     if member.voice is None:
-        print("❌ member.voice is None")
         return None
     vc = member.guild.voice_client
     if vc is None:
-        print("🔊 음성 채널 연결")
         vc = await member.voice.channel.connect()
     return vc
 
 # ======================================================
-# 오디오
+# 오디오 (Opus 방식 – Railway 확정)
 # ======================================================
-async def play_youtube(member, url, start, duration):
-    print("▶ play_youtube", url, start, duration)
+YDL_OPTS = {
+    "format": "bestaudio/best",
+    "quiet": True,
+    "nocheckcertificate": True,
+    "source_address": "0.0.0.0"
+}
 
+async def play_youtube(member, url, start, duration):
     vc = await connect_voice(member)
     if vc is None:
         return
@@ -88,24 +79,16 @@ async def play_youtube(member, url, start, duration):
         vc.stop()
 
     try:
-        with yt_dlp.YoutubeDL({
-            "format": "bestaudio/best",
-            "quiet": False,
-            "nocheckcertificate": True,
-            "source_address": "0.0.0.0"
-        }) as ydl:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
             info = ydl.extract_info(url, download=False)
-            audio_url = info["url"]
+            stream_url = info["url"]
 
-        vc.play(
-            discord.FFmpegPCMAudio(
-                audio_url,
-                executable=FFMPEG_EXEC,
-                before_options=f"-ss {start}",
-                options=f"-t {duration} -vn"
-            )
+        source = await discord.FFmpegOpusAudio.from_probe(
+            stream_url,
+            before_options=f"-ss {start}",
+            options=f"-t {duration}"
         )
-        print("🎵 재생 시작")
+        vc.play(source)
 
     except Exception as e:
         print("🔥 재생 오류:", e)
@@ -113,7 +96,6 @@ async def play_youtube(member, url, start, duration):
 async def play_song(member, name):
     doc = team_ref(member.guild.id, "entranceSongs").document(name).get()
     if not doc.exists:
-        print("❌ 등장곡 없음:", name)
         return
     d = doc.to_dict()
     await play_youtube(member, d["url"], d["start"], d["end"] - d["start"])
@@ -134,7 +116,7 @@ async def play_event(member, key):
     if vc and os.path.exists(path):
         if vc.is_playing():
             vc.stop()
-        vc.play(discord.FFmpegPCMAudio(path, executable=FFMPEG_EXEC))
+        vc.play(discord.FFmpegPCMAudio(path))
 
 async def stop_audio(member):
     vc = member.guild.voice_client
@@ -155,7 +137,7 @@ def game_state(guild_id):
 # ======================================================
 @bot.event
 async def on_ready():
-    print("🔥 등장곡 봇 실행 완료 (Railway 최종본)")
+    print("🔥 등장곡 봇 실행 완료 (모든 기능 포함)")
 
 # ======================================================
 # 음성 명령어
@@ -195,120 +177,130 @@ def parse_song(args):
 @bot.command(name="저장")
 async def save(ctx, *, args):
     if not is_admin(ctx): return
-    n, u, s, e = parse_song(args)
-    team_ref(ctx.guild.id, "entranceSongs").document(n).set({
-        "url": u, "start": s, "end": e
+    n,u,s,e = parse_song(args)
+    team_ref(ctx.guild.id,"entranceSongs").document(n).set({
+        "url":u,"start":s,"end":e
     })
     await refresh_lineup(ctx)
 
 @bot.command(name="변경")
 async def change(ctx, *, args):
     if not is_admin(ctx): return
-    n, u, s, e = parse_song(args)
-    team_ref(ctx.guild.id, "entranceSongs").document(n).set({
-        "url": u, "start": s, "end": e
+    n,u,s,e = parse_song(args)
+    team_ref(ctx.guild.id,"entranceSongs").document(n).set({
+        "url":u,"start":s,"end":e
     }, merge=True)
     await refresh_lineup(ctx)
 
 @bot.command(name="미리듣기")
-async def preview(ctx, name: str):
+async def preview(ctx, name:str):
     await preview_song(ctx.author, name)
 
 # ======================================================
-# 타순
+# 타순 관리
 # ======================================================
 @bot.command(name="타순")
-async def set_order(ctx, num: int, *, args):
+async def set_order(ctx, num:int, *, args):
     if not is_admin(ctx): return
-    _, name = args.split("/", 1)
-    team_ref(ctx.guild.id, "lineup").document(str(num)).set({"name": name.strip()})
+    _, name = args.split("/",1)
+    team_ref(ctx.guild.id,"lineup").document(str(num)).set({"name":name.strip()})
     await refresh_lineup(ctx)
 
 @bot.command(name="타순삭제")
-async def del_order(ctx, num: int):
+async def del_order(ctx, num:int):
     if not is_admin(ctx): return
-    team_ref(ctx.guild.id, "lineup").document(str(num)).delete()
+    team_ref(ctx.guild.id,"lineup").document(str(num)).delete()
     await refresh_lineup(ctx)
 
 @bot.command(name="교체")
-async def change_player(ctx, num: int, *, args):
+async def change_player(ctx, num:int, *, args):
     if not is_admin(ctx): return
-    _, _, new = args.split("/", 2)
-    team_ref(ctx.guild.id, "lineup").document(str(num)).set({"name": new.strip()})
+    _,_, new = args.split("/",2)
+    team_ref(ctx.guild.id,"lineup").document(str(num)).set({"name":new.strip()})
     await refresh_lineup(ctx)
 
 # ======================================================
 # 이벤트 저장
 # ======================================================
 @bot.command(name="이벤트저장")
-async def save_event(ctx, key: str, filename: str):
+async def save_event(ctx, key:str, filename:str):
     if not is_admin(ctx): return
-    team_ref(ctx.guild.id, "events").document(key).set({"file": filename})
+    team_ref(ctx.guild.id,"events").document(key).set({"file":filename})
 
 # ======================================================
 # UI
 # ======================================================
 class Control(discord.ui.Button):
-    def __init__(self, label, action):
-        super().__init__(label=label, style=discord.ButtonStyle.primary)
-        self.action = action
+    def __init__(self,label,action):
+        super().__init__(label=label,style=discord.ButtonStyle.primary)
+        self.action=action
 
-    async def callback(self, interaction):
+    async def callback(self,interaction):
         await interaction.response.defer()
-        m = interaction.user
-        gid = m.guild.id
+        m=interaction.user
+        gid=m.guild.id
 
         if self.action.startswith("num"):
-            order = int(self.action.replace("num", ""))
-            doc = team_ref(gid, "lineup").document(str(order)).get()
+            order=int(self.action.replace("num",""))
+            doc=team_ref(gid,"lineup").document(str(order)).get()
             if doc.exists:
-                await play_song(m, doc.to_dict()["name"])
+                await play_song(m,doc.to_dict()["name"])
             return
 
-        if self.action == "stop":
+        if self.action=="stop":
             await stop_audio(m)
-        elif self.action in ["strikeout", "fly", "homerun", "inning_change", "game_end"]:
-            await play_event(m, self.action)
-        elif self.action == "next":
-            st = game_state(gid)
-            cur = st.get().to_dict()["currentOrder"]
-            nxt = cur + 1 if cur < 9 else 1
-            st.update({"currentOrder": nxt})
-            doc = team_ref(gid, "lineup").document(str(nxt)).get()
+        elif self.action in ["strikeout","fly","homerun","inning_change","game_end"]:
+            await play_event(m,self.action)
+        elif self.action=="next":
+            st=game_state(gid)
+            cur=st.get().to_dict()["currentOrder"]
+            nxt=cur+1 if cur<9 else 1
+            st.update({"currentOrder":nxt})
+            doc=team_ref(gid,"lineup").document(str(nxt)).get()
             if doc.exists:
-                await play_song(m, doc.to_dict()["name"])
+                await play_song(m,doc.to_dict()["name"])
 
 class LineupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        for i in range(1, 10):
-            self.add_item(Control(str(i), f"num{i}"))
-        self.add_item(Control("▶ 다음 타자", "next"))
-        self.add_item(Control("❌ 삼진", "strikeout"))
-        self.add_item(Control("🕊 플라이", "fly"))
-        self.add_item(Control("💥 홈런", "homerun"))
-        self.add_item(Control("🔁 이닝 교대", "inning_change"))
-        self.add_item(Control("⏹ 중지", "stop"))
-        self.add_item(Control("🔴 경기 종료", "game_end"))
+        for i in range(1,10):
+            self.add_item(Control(str(i),f"num{i}"))
+        self.add_item(Control("▶ 다음 타자","next"))
+        self.add_item(Control("❌ 삼진","strikeout"))
+        self.add_item(Control("🕊 플라이","fly"))
+        self.add_item(Control("💥 홈런","homerun"))
+        self.add_item(Control("🔁 이닝 교대","inning_change"))
+        self.add_item(Control("⏹ 중지","stop"))
+        self.add_item(Control("🔴 경기 종료","game_end"))
 
 # ======================================================
-# 라인업
+# 라인업 출력
 # ======================================================
 async def build_lineup(ctx):
-    embed = discord.Embed(title=f"⚾ {get_team(ctx.guild.id)} 라인업")
-    for i in range(1, 10):
-        d = team_ref(ctx.guild.id, "lineup").document(str(i)).get()
-        embed.add_field(name=f"{i}번", value=d.to_dict()["name"] if d.exists else "-", inline=True)
+    embed=discord.Embed(title=f"⚾ {get_team(ctx.guild.id)} 라인업")
+    for i in range(1,10):
+        d=team_ref(ctx.guild.id,"lineup").document(str(i)).get()
+        embed.add_field(
+            name=f"{i}번",
+            value=d.to_dict()["name"] if d.exists else "-",
+            inline=True
+        )
     return embed
 
 async def refresh_lineup(ctx):
-    gid = ctx.guild.id
+    gid=ctx.guild.id
     if gid in lineup_message:
-        await lineup_message[gid].edit(embed=await build_lineup(ctx), view=LineupView())
+        await lineup_message[gid].edit(
+            embed=await build_lineup(ctx),
+            view=LineupView()
+        )
 
 @bot.command(name="라인업")
 async def lineup(ctx):
-    lineup_message[ctx.guild.id] = await ctx.send(embed=await build_lineup(ctx), view=LineupView())
+    lineup_message[ctx.guild.id]=await ctx.send(
+        embed=await build_lineup(ctx),
+        view=LineupView()
+    )
 
 # ======================================================
 # RUN
