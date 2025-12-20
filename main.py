@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import yt_dlp
 import os
+import json
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -11,11 +12,17 @@ from firebase_admin import credentials, firestore
 # =======================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise ValueError("DISCORD_TOKEN 없음")
 
 # =======================
-# Firebase
+# Firebase (Railway ENV 방식)
 # =======================
-cred = credentials.Certificate("serviceAccountKey.json")
+firebase_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
+if not firebase_json:
+    raise ValueError("FIREBASE_SERVICE_ACCOUNT 없음")
+
+cred = credentials.Certificate(json.loads(firebase_json))
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -126,7 +133,7 @@ def game_state(guild_id):
 # =======================
 @bot.event
 async def on_ready():
-    print("🔥 등장곡 봇 실행 완료 (타자 버튼 수정됨)")
+    print("🔥 Railway 배포용 등장곡 봇 실행 완료")
 
 # =======================
 # 음성
@@ -223,7 +230,7 @@ async def save_event(ctx, key: str, filename: str):
     })
 
 # =======================
-# UI 버튼
+# UI
 # =======================
 class Control(discord.ui.Button):
     def __init__(self, label, action):
@@ -235,7 +242,6 @@ class Control(discord.ui.Button):
         m = interaction.user
         gid = m.guild.id
 
-        # 🎵 타자 번호 버튼 (핵심 수정)
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(gid, "lineup").document(str(order)).get()
