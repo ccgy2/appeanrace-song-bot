@@ -89,9 +89,10 @@ async def play_youtube(member, url, start, duration):
 
     vc.play(
         discord.FFmpegPCMAudio(
-            audio_url,
-            before_options=f"{FFMPEG_BEFORE} -ss {start}",
-            options=f"-t {duration} -vn"
+        audio_url,
+        executable="ffmpeg",
+        before_options=f"{FFMPEG_BEFORE} -ss {start}",
+        options=f"-t {duration} -vn"
         )
     )
 
@@ -316,3 +317,4 @@ async def lineup(ctx):
 # RUN
 # =======================
 bot.run(TOKEN)
+
