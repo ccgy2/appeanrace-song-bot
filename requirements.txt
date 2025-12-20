@@ -1,5 +1,4 @@
-discord.py==2.4.0
-PyNaCl
+discord.py
 yt-dlp
-firebase-admin
 python-dotenv
+firebase-admin
