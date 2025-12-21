@@ -47,13 +47,20 @@ async def get_or_create_role(guild):
         role = await guild.create_role(name=ENTRANCE_ROLE_NAME)
     return role
 
-async def connect_voice_by_guild(guild):
+async def connect_voice_by_guild(guild, log_channel=None):
     vc = guild.voice_client
     if vc:
+        if log_channel:
+            await log_channel.send("🔊 이미 음성 채널에 연결됨")
         return vc
     for m in guild.members:
         if m.voice:
-            return await m.voice.channel.connect()
+            vc = await m.voice.channel.connect()
+            if log_channel:
+                await log_channel.send(f"🔊 음성 채널 연결됨: {m.voice.channel.name}")
+            return vc
+    if log_channel:
+        await log_channel.send("❌ 음성 채널에 아무도 없음")
     return None
 
 def volume_ref(team):
@@ -85,18 +92,26 @@ YDL_OPTS = {
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
-async def play_youtube(guild, team, url, start, duration, order=None):
-    vc = await connect_voice_by_guild(guild)
+async def play_youtube(guild, team, url, start, duration, order=None, log_channel=None):
+    if log_channel:
+        await log_channel.send("🎵 재생 시도 중...")
+    vc = await connect_voice_by_guild(guild, log_channel)
     if vc is None:
         return
-
     if vc.is_playing():
         vc.stop()
-
-    with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-        info = ydl.extract_info(url, download=False)
-        audio_url = info["url"]
-
+        if log_channel:
+            await log_channel.send("⏹ 기존 재생 중지")
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(url, download=False)
+            audio_url = info["url"]
+            if log_channel:
+                await log_channel.send("📥 유튜브 오디오 URL 추출 완료")
+    except Exception as e:
+        if log_channel:
+            await log_channel.send(f"❌ yt-dlp 오류: {e}")
+        return
     source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(
             audio_url,
@@ -106,40 +121,46 @@ async def play_youtube(guild, team, url, start, duration, order=None):
         ),
         volume=get_volume(team)
     )
-
     vc.play(source)
-
+    if log_channel:
+        await log_channel.send("▶️ 노래 재생 시작")
     if order is not None:
         game_state(team).update({"currentOrder": order})
 
-async def play_song(guild, team, name, order):
+async def play_song(guild, team, name, order, log_channel):
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
+        await log_channel.send(f"❌ 등장곡 데이터 없음: {name}")
         return
     d = doc.to_dict()
-    await play_youtube(guild, team, d["url"], d["start"], d["end"] - d["start"], order)
+    await log_channel.send(f"🎶 등장곡 재생: {name}")
+    await play_youtube(
+        guild,
+        team,
+        d["url"],
+        d["start"],
+        d["end"] - d["start"],
+        order,
+        log_channel
+    )
 
 async def preview_song(ctx, name):
     team = get_team(ctx.guild.id)
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
+        await ctx.send("❌ 저장된 노래 없음")
         return
     d = doc.to_dict()
-    await play_youtube(ctx.guild, team, d["url"], d["start"], 5)
-
-async def play_event(guild, team, key):
-    doc = team_ref(team, "events").document(key).get()
-    if not doc.exists:
-        return
-    path = os.path.join("sounds", doc.to_dict()["file"])
-    vc = await connect_voice_by_guild(guild)
-    if vc and os.path.exists(path):
-        if vc.is_playing():
-            vc.stop()
-        vc.play(discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(path),
-            volume=get_volume(team)
-        ))
+    await ctx.send(f"🎧 미리듣기: {name}")
+    await play_youtube(
+        ctx.guild,
+        team,
+        d["url"],
+        d["start"],
+        5,
+        None,
+        ctx.channel
+    )
 
 @bot.event
 async def on_ready():
@@ -155,18 +176,24 @@ async def on_voice_state_update(member, before, after):
             team = team_doc.id
             for d in team_ref(team, "lineup").stream():
                 if d.to_dict().get("name") == nickname:
-                    await play_song(member.guild, team, nickname, int(d.id))
+                    await play_song(
+                        member.guild,
+                        team,
+                        nickname,
+                        int(d.id),
+                        member.guild.text_channels[0]
+                    )
                     return
 
 @bot.command(name="입장")
 async def join(ctx):
-    if ctx.author.voice:
-        await connect_voice_by_guild(ctx.guild)
+    await connect_voice_by_guild(ctx.guild, ctx.channel)
 
 @bot.command(name="퇴장")
 async def leave(ctx):
     if ctx.guild.voice_client:
         await ctx.guild.voice_client.disconnect()
+        await ctx.send("🔇 음성 채널 퇴장")
 
 @bot.command(name="팀")
 async def set_team(ctx, team: str):
@@ -198,6 +225,7 @@ async def save(ctx, *, args):
     team = get_team(ctx.guild.id)
     n, u, s, e = parse_song(args)
     team_ref(team, "entranceSongs").document(n).set({"url": u, "start": s, "end": e})
+    await ctx.send(f"✅ 등장곡 저장: {n}")
     await refresh_lineup(ctx)
 
 @bot.command(name="변경")
@@ -209,6 +237,7 @@ async def change(ctx, *, args):
     team_ref(team, "entranceSongs").document(n).set(
         {"url": u, "start": s, "end": e}, merge=True
     )
+    await ctx.send(f"♻️ 등장곡 변경: {n}")
     await refresh_lineup(ctx)
 
 @bot.command(name="미리듣기")
@@ -222,6 +251,7 @@ async def set_order(ctx, num: int, *, args):
     team = get_team(ctx.guild.id)
     _, name = args.split("/", 1)
     team_ref(team, "lineup").document(str(num)).set({"name": name.strip()})
+    await ctx.send(f"✅ {num}번 타순 설정: {name.strip()}")
     await refresh_lineup(ctx)
 
 @bot.command(name="타순삭제")
@@ -229,6 +259,7 @@ async def del_order(ctx, num: int):
     if not is_admin(ctx):
         return
     team_ref(get_team(ctx.guild.id), "lineup").document(str(num)).delete()
+    await ctx.send(f"🗑 {num}번 타순 삭제")
     await refresh_lineup(ctx)
 
 @bot.command(name="교체")
@@ -238,6 +269,7 @@ async def change_player(ctx, num: int, *, args):
     team = get_team(ctx.guild.id)
     _, new = args.split("/", 1)
     team_ref(team, "lineup").document(str(num)).set({"name": new.strip()})
+    await ctx.send(f"🔄 {num}번 타순 교체: {new.strip()}")
     await refresh_lineup(ctx)
 
 @bot.command(name="이벤트저장")
@@ -245,6 +277,7 @@ async def save_event(ctx, key: str, filename: str):
     if not is_admin(ctx):
         return
     team_ref(get_team(ctx.guild.id), "events").document(key).set({"file": filename})
+    await ctx.send(f"✅ 이벤트 저장: {key}")
 
 @bot.command(name="등장곡역할주기")
 async def give_role(ctx, member: discord.Member):
@@ -252,6 +285,7 @@ async def give_role(ctx, member: discord.Member):
         return
     role = await get_or_create_role(ctx.guild)
     await member.add_roles(role)
+    await ctx.send(f"🎧 등장곡 재생자 역할 부여: {member.display_name}")
 
 @bot.command(name="등장곡역할회수")
 async def remove_role(ctx, member: discord.Member):
@@ -259,6 +293,7 @@ async def remove_role(ctx, member: discord.Member):
         return
     role = await get_or_create_role(ctx.guild)
     await member.remove_roles(role)
+    await ctx.send(f"❌ 등장곡 재생자 역할 회수: {member.display_name}")
 
 class Control(discord.ui.Button):
     def __init__(self, label, action):
@@ -269,25 +304,40 @@ class Control(discord.ui.Button):
         await interaction.response.defer()
         team = get_team(interaction.guild.id)
         if not has_entrance_role(interaction.user):
+            await interaction.channel.send("❌ 등장곡 재생자 역할 필요")
             return
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(team, "lineup").document(str(order)).get()
             if doc.exists:
-                await play_song(interaction.guild, team, doc.to_dict()["name"], order)
+                await play_song(
+                    interaction.guild,
+                    team,
+                    doc.to_dict()["name"],
+                    order,
+                    interaction.channel
+                )
                 await refresh_lineup(interaction)
         elif self.action == "stop":
             if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
                 interaction.guild.voice_client.stop()
+                await interaction.channel.send("⏹ 재생 중지")
         elif self.action in ["strikeout", "fly", "homerun", "inning_change", "game_end"]:
             await play_event(interaction.guild, team, self.action)
+            await interaction.channel.send(f"📣 이벤트 사운드: {self.action}")
         elif self.action == "next":
             st = game_state(team)
             cur = st.get().to_dict()["currentOrder"]
             nxt = cur + 1 if cur < 9 else 1
             doc = team_ref(team, "lineup").document(str(nxt)).get()
             if doc.exists:
-                await play_song(interaction.guild, team, doc.to_dict()["name"], nxt)
+                await play_song(
+                    interaction.guild,
+                    team,
+                    doc.to_dict()["name"],
+                    nxt,
+                    interaction.channel
+                )
                 await refresh_lineup(interaction)
 
 class LineupView(discord.ui.View):
