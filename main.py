@@ -342,6 +342,15 @@ class Control(discord.ui.Button):
         elif self.action == "score":
             await play_local_sound(interaction.guild, team, "score", ch)
 
+        elif self.action == "fly":
+            await play_local_sound(interaction.guild, team, "fly", ch)
+
+        elif self.action == "game_end":
+            await play_local_sound(interaction.guild, team, "game_end", ch)
+
+        elif self.action == "inning_change":
+            await play_local_sound(interaction.guild, team, "inning_change", ch)
+
         elif self.action == "stop":
             if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
                 interaction.guild.voice_client.stop()
@@ -355,9 +364,12 @@ class LineupView(discord.ui.View):
         self.add_item(Control("📋 라인업 송", "lineup_song"))
         self.add_item(Control("💥 홈런", "homerun"))
         self.add_item(Control("❌ 삼진", "strikeout"))
+        self.add_item(Control("🐦‍🔥 플라이", "fly"))
         self.add_item(Control("🧤 아웃", "out"))
         self.add_item(Control("⚾ 득점", "score"))
         self.add_item(Control("⏹ 중지", "stop"))
+        self.add_item(Control("🛑 경기종료", "game_end"))
+        self.add_item(Control("🔁 이닝교대", "inning_change"))
 
 # =======================
 # 라인업
@@ -404,3 +416,4 @@ async def help_cmd(ctx):
     )
 
 bot.run(TOKEN)
+
