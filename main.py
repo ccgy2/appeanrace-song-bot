@@ -26,7 +26,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 current_team = {}
 lineup_message = {}
-voice_clients = {}
 
 ENTRANCE_ROLE_NAME = "등장곡 재생자"
 
@@ -48,13 +47,14 @@ async def get_or_create_role(guild):
         role = await guild.create_role(name=ENTRANCE_ROLE_NAME)
     return role
 
-async def connect_voice(member):
-    if member.voice is None:
-        return None
-    ch = member.voice.channel
-    if ch.id not in voice_clients or not voice_clients[ch.id].is_connected():
-        voice_clients[ch.id] = await ch.connect()
-    return voice_clients[ch.id]
+async def connect_voice_by_guild(guild):
+    vc = guild.voice_client
+    if vc:
+        return vc
+    for m in guild.members:
+        if m.voice:
+            return await m.voice.channel.connect()
+    return None
 
 def volume_ref(team):
     return db.collection("teams").document(team).collection("state").document("volume")
@@ -85,15 +85,18 @@ YDL_OPTS = {
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
-async def play_youtube(member, team, url, start, duration, order=None):
-    vc = await connect_voice(member)
+async def play_youtube(guild, team, url, start, duration, order=None):
+    vc = await connect_voice_by_guild(guild)
     if vc is None:
         return
+
     if vc.is_playing():
         vc.stop()
+
     with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
         info = ydl.extract_info(url, download=False)
         audio_url = info["url"]
+
     source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(
             audio_url,
@@ -103,30 +106,33 @@ async def play_youtube(member, team, url, start, duration, order=None):
         ),
         volume=get_volume(team)
     )
+
     vc.play(source)
+
     if order is not None:
         game_state(team).update({"currentOrder": order})
 
-async def play_song(member, team, name, order):
+async def play_song(guild, team, name, order):
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
         return
     d = doc.to_dict()
-    await play_youtube(member, team, d["url"], d["start"], d["end"] - d["start"], order)
+    await play_youtube(guild, team, d["url"], d["start"], d["end"] - d["start"], order)
 
-async def preview_song(member, team, name):
+async def preview_song(ctx, name):
+    team = get_team(ctx.guild.id)
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
         return
     d = doc.to_dict()
-    await play_youtube(member, team, d["url"], d["start"], 5)
+    await play_youtube(ctx.guild, team, d["url"], d["start"], 5)
 
-async def play_event(member, team, key):
+async def play_event(guild, team, key):
     doc = team_ref(team, "events").document(key).get()
     if not doc.exists:
         return
     path = os.path.join("sounds", doc.to_dict()["file"])
-    vc = await connect_voice(member)
+    vc = await connect_voice_by_guild(guild)
     if vc and os.path.exists(path):
         if vc.is_playing():
             vc.stop()
@@ -134,12 +140,6 @@ async def play_event(member, team, key):
             discord.FFmpegPCMAudio(path),
             volume=get_volume(team)
         ))
-
-async def stop_audio(member):
-    if member.voice and member.voice.channel.id in voice_clients:
-        vc = voice_clients[member.voice.channel.id]
-        if vc.is_playing():
-            vc.stop()
 
 @bot.event
 async def on_ready():
@@ -155,17 +155,18 @@ async def on_voice_state_update(member, before, after):
             team = team_doc.id
             for d in team_ref(team, "lineup").stream():
                 if d.to_dict().get("name") == nickname:
-                    await play_song(member, team, nickname, int(d.id))
+                    await play_song(member.guild, team, nickname, int(d.id))
                     return
 
 @bot.command(name="입장")
 async def join(ctx):
-    await connect_voice(ctx.author)
+    if ctx.author.voice:
+        await connect_voice_by_guild(ctx.guild)
 
 @bot.command(name="퇴장")
 async def leave(ctx):
-    if ctx.author.voice and ctx.author.voice.channel.id in voice_clients:
-        await voice_clients[ctx.author.voice.channel.id].disconnect()
+    if ctx.guild.voice_client:
+        await ctx.guild.voice_client.disconnect()
 
 @bot.command(name="팀")
 async def set_team(ctx, team: str):
@@ -212,7 +213,7 @@ async def change(ctx, *, args):
 
 @bot.command(name="미리듣기")
 async def preview(ctx, name: str):
-    await preview_song(ctx.author, get_team(ctx.guild.id), name)
+    await preview_song(ctx, name)
 
 @bot.command(name="타순")
 async def set_order(ctx, num: int, *, args):
@@ -266,27 +267,27 @@ class Control(discord.ui.Button):
 
     async def callback(self, interaction):
         await interaction.response.defer()
-        m = interaction.user
-        team = get_team(m.guild.id)
-        if not has_entrance_role(m):
+        team = get_team(interaction.guild.id)
+        if not has_entrance_role(interaction.user):
             return
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(team, "lineup").document(str(order)).get()
             if doc.exists:
-                await play_song(m, team, doc.to_dict()["name"], order)
+                await play_song(interaction.guild, team, doc.to_dict()["name"], order)
                 await refresh_lineup(interaction)
         elif self.action == "stop":
-            await stop_audio(m)
+            if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+                interaction.guild.voice_client.stop()
         elif self.action in ["strikeout", "fly", "homerun", "inning_change", "game_end"]:
-            await play_event(m, team, self.action)
+            await play_event(interaction.guild, team, self.action)
         elif self.action == "next":
             st = game_state(team)
             cur = st.get().to_dict()["currentOrder"]
             nxt = cur + 1 if cur < 9 else 1
             doc = team_ref(team, "lineup").document(str(nxt)).get()
             if doc.exists:
-                await play_song(m, team, doc.to_dict()["name"], nxt)
+                await play_song(interaction.guild, team, doc.to_dict()["name"], nxt)
                 await refresh_lineup(interaction)
 
 class LineupView(discord.ui.View):
@@ -309,17 +310,27 @@ async def build_lineup(ctx):
     embed = discord.Embed(title=f"⚾ {team} 라인업 (현재 타순: {cur}번)")
     for i in range(1, 10):
         d = team_ref(team, "lineup").document(str(i)).get()
-        embed.add_field(name=f"{i}번", value=d.to_dict()["name"] if d.exists else "-", inline=True)
+        embed.add_field(
+            name=f"{i}번",
+            value=d.to_dict()["name"] if d.exists else "-",
+            inline=True
+        )
     return embed
 
 async def refresh_lineup(ctx):
     gid = ctx.guild.id
     if gid in lineup_message:
-        await lineup_message[gid].edit(embed=await build_lineup(ctx), view=LineupView())
+        await lineup_message[gid].edit(
+            embed=await build_lineup(ctx),
+            view=LineupView()
+        )
 
 @bot.command(name="라인업")
 async def lineup(ctx):
-    lineup_message[ctx.guild.id] = await ctx.send(embed=await build_lineup(ctx), view=LineupView())
+    lineup_message[ctx.guild.id] = await ctx.send(
+        embed=await build_lineup(ctx),
+        view=LineupView()
+    )
 
 @bot.command(name="도움")
 async def help_cmd(ctx):
