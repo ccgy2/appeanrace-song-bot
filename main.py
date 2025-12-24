@@ -177,12 +177,7 @@ async def play_youtube(guild, team, url, start, duration, order=None, channel=No
         game_state(team).update({"currentOrder": order})
 
     if channel:
-        await update_now_playing_embed(
-            channel,
-            guild.id,
-            "🎶 재생 중",
-            "유튜브 등장곡"
-        )
+        await update_now_playing_embed(channel, guild.id, "🎶 재생 중", "유튜브 등장곡")
 
 async def play_song(guild, team, name, order, channel):
     doc = team_ref(team, "entranceSongs").document(name).get()
@@ -436,6 +431,17 @@ class Control(discord.ui.Button):
         team = get_team(interaction.guild.id)
         ch = interaction.channel
 
+        if self.action == "stop":
+            if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
+                interaction.guild.voice_client.stop()
+                await update_now_playing_embed(
+                    ch,
+                    interaction.guild.id,
+                    "⏹ 정지됨",
+                    "재생 중지"
+                )
+            return
+
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(team, "lineup").document(str(order)).get()
@@ -456,7 +462,7 @@ class LineupView(discord.ui.View):
         super().__init__(timeout=None)
         for i in range(1, 10):
             self.add_item(Control(str(i), f"num{i}"))
-        self.add_item(Control("🏁 경기시작", "start"))
+        self.add_item(Control("⏹ 정지", "stop"))
         self.add_item(Control("📋 라인업 송", "lineup"))
         self.add_item(Control("💥 홈런", "homerun"))
         self.add_item(Control("❌ 삼진", "strikeout"))
@@ -517,4 +523,3 @@ async def help_cmd(ctx):
     )
 
 bot.run(TOKEN)
-
