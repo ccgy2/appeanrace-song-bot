@@ -21,7 +21,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 # 자동 퇴장 설정
 # =======================
 VOICE_IDLE_SECONDS = 300
-WARNING_SECONDS = 30
 
 # =======================
 # Firebase
@@ -43,24 +42,24 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =======================
-# 상태
+# 상수 / 상태
 # =======================
+ENTRANCE_ROLE_NAME = "등장곡 재생인"
+
 lineup_message = {}
 idle_tasks = {}
 now_playing_message = {}
 
-ENTRANCE_ROLE_NAME = "등장곡 재생인"
-
 # =======================
 # 권한
 # =======================
-def has_role(member):
+def has_entrance_role(member):
     return any(r.name == ENTRANCE_ROLE_NAME for r in member.roles)
 
 def can_manage(ctx):
     return (
         ctx.author.guild_permissions.administrator
-        or has_role(ctx.author)
+        or has_entrance_role(ctx.author)
         or ctx.author.id == OWNER_ID
     )
 
@@ -73,8 +72,24 @@ async def get_or_create_role(guild):
 # =======================
 # Firestore 구조
 # =======================
+# entranceSongs (공용)
+# events (공용)
+# teams/{team}/lineup
+# teams/{team}/state (volume, game)
+# teams_meta/{teamKey} -> 실제 팀명
+# =======================
 def team_ref(team, path):
     return db.collection("teams").document(team).collection(path)
+
+def team_meta(team):
+    return db.collection("teams_meta").document(team)
+
+def get_team_name(team):
+    doc = team_meta(team).get()
+    return doc.to_dict().get("name", team) if doc.exists else team
+
+def set_team_name(team, name):
+    team_meta(team).set({"name": name})
 
 def volume_ref(team):
     return team_ref(team, "state").document("volume")
@@ -84,7 +99,7 @@ def get_volume(team):
     if not doc.exists:
         volume_ref(team).set({"value": 0.5})
         return 0.5
-    return doc.to_dict().get("value", 0.5)
+    return doc.to_dict()["value"]
 
 def set_volume(team, value):
     volume_ref(team).set({"value": value})
@@ -112,10 +127,11 @@ async def connect_voice(guild):
 async def update_now_playing(channel, team, title, song):
     vol = int(get_volume(team) * 100)
     order = game_state(team).get().to_dict().get("currentOrder", "-")
+    team_name = get_team_name(team)
 
     embed = discord.Embed(title=title, color=discord.Color.green())
     embed.add_field(name="🎵 현재 곡", value=song, inline=False)
-    embed.add_field(name="🏷 팀", value=team, inline=True)
+    embed.add_field(name="🏷 팀", value=team_name, inline=True)
     embed.add_field(name="🔊 볼륨", value=f"{vol}%", inline=True)
     embed.add_field(name="⚾ 타순", value=f"{order}번", inline=True)
 
@@ -128,12 +144,7 @@ async def update_now_playing(channel, team, title, song):
 # =======================
 # 오디오 (유튜브)
 # =======================
-YDL_OPTS = {
-    "format": "bestaudio/best",
-    "quiet": True,
-    "nocheckcertificate": True,
-}
-
+YDL_OPTS = {"format": "bestaudio/best", "quiet": True}
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 async def play_youtube(guild, team, url, start, duration, order, channel):
@@ -164,7 +175,7 @@ async def play_youtube(guild, team, url, start, duration, order, channel):
 async def play_song(guild, team, name, order, channel):
     doc = db.collection("entranceSongs").document(name).get()
     if not doc.exists:
-        await channel.send(f"❌ 등장곡 없음: {name}")
+        await channel.send("❌ 등장곡 없음")
         return
     d = doc.to_dict()
     await play_youtube(
@@ -174,30 +185,30 @@ async def play_song(guild, team, name, order, channel):
     )
 
 # =======================
-# 파일 사운드
+# 파일 사운드 (이벤트)
 # =======================
-async def play_local_sound(guild, team, folder, channel):
-    base = os.path.join("sounds", folder)
-    if not os.path.exists(base):
+async def play_event_sound(guild, team, key, channel):
+    doc = db.collection("events").document(key).get()
+    if not doc.exists:
+        await channel.send("❌ 이벤트 없음")
         return
-    files = [f for f in os.listdir(base) if f.endswith(".mp3")]
-    if not files:
+    path = os.path.join("sounds", doc.to_dict()["file"])
+    if not os.path.exists(path):
+        await channel.send("❌ 파일 없음")
         return
 
-    path = os.path.join(base, random.choice(files))
     vc = await connect_voice(guild)
     if not vc:
         return
     if vc.is_playing():
         vc.stop()
 
-    vc.play(
-        discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(path),
-            volume=get_volume(team)
-        )
-    )
-    await update_now_playing(channel, team, "🎶 재생 중", folder)
+    vc.play(discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(path),
+        volume=get_volume(team)
+    ))
+
+    await update_now_playing(channel, team, "🎶 재생 중", key)
 
 # =======================
 # UI 버튼
@@ -228,7 +239,7 @@ class Control(discord.ui.Button):
                     doc.to_dict()["name"], order, ch
                 )
         else:
-            await play_local_sound(guild, self.team, self.action, ch)
+            await play_event_sound(guild, self.team, self.action, ch)
 
 class LineupView(discord.ui.View):
     def __init__(self, team):
@@ -236,14 +247,6 @@ class LineupView(discord.ui.View):
         for i in range(1, 10):
             self.add_item(Control(str(i), f"num{i}", team))
         self.add_item(Control("⏹ 정지", "stop", team))
-        self.add_item(Control("📋 라인업", "lineup", team))
-        self.add_item(Control("💥 홈런", "homerun", team))
-        self.add_item(Control("❌ 삼진", "strikeout", team))
-        self.add_item(Control("🐦 플라이", "fly", team))
-        self.add_item(Control("🧤 아웃", "out", team))
-        self.add_item(Control("⚾ 득점", "score", team))
-        self.add_item(Control("🔁 이닝교대", "inning_change", team))
-        self.add_item(Control("🛑 종료", "game_end", team))
 
 # =======================
 # 명령어
@@ -257,13 +260,19 @@ async def leave(ctx):
     if ctx.guild.voice_client:
         await ctx.guild.voice_client.disconnect()
 
+@bot.command(name="팀")
+async def set_team_name_cmd(ctx, team: str, *, name: str):
+    if not can_manage(ctx):
+        return
+    set_team_name(team, name)
+    await ctx.send(f"✅ {team} → {name}")
+
 @bot.command(name="볼륨")
 async def volume(ctx, team: str, value: int):
     if not can_manage(ctx):
         return
-    if 0 <= value <= 100:
-        set_volume(team, value / 100)
-        await ctx.send(f"🔊 {team} 볼륨 {value}%")
+    set_volume(team, value / 100)
+    await ctx.send(f"🔊 {get_team_name(team)} 볼륨 {value}%")
 
 @bot.command(name="저장")
 async def save(ctx, *, args):
@@ -271,35 +280,23 @@ async def save(ctx, *, args):
         return
     name, url, tr = [x.strip() for x in args.split(" / ", 2)]
     a, b = tr.split("-")
+
     def sec(t):
         if ":" in t:
             m, s = t.split(":")
             return int(m) * 60 + int(s)
         return int(t)
+
     db.collection("entranceSongs").document(name).set({
         "url": url.split("&")[0],
         "start": sec(a),
         "end": sec(b)
     })
-    await ctx.send(f"✅ 저장 완료: {name}")
+    await ctx.send(f"✅ 등장곡 저장: {name}")
 
 @bot.command(name="변경")
 async def change(ctx, *, args):
-    if not can_manage(ctx):
-        return
-    name, url, tr = [x.strip() for x in args.split(" / ", 2)]
-    a, b = tr.split("-")
-    def sec(t):
-        if ":" in t:
-            m, s = t.split(":")
-            return int(m) * 60 + int(s)
-        return int(t)
-    db.collection("entranceSongs").document(name).set({
-        "url": url.split("&")[0],
-        "start": sec(a),
-        "end": sec(b)
-    }, merge=True)
-    await ctx.send(f"♻️ 변경 완료: {name}")
+    await save(ctx, args=args)
 
 @bot.command(name="미리듣기")
 async def preview(ctx, name: str):
@@ -309,29 +306,45 @@ async def preview(ctx, name: str):
     if not doc.exists:
         return
     d = doc.to_dict()
-    await play_youtube(
-        ctx.guild, "미리듣기",
-        d["url"], d["start"], 5,
-        0, ctx.channel
-    )
+    await play_youtube(ctx.guild, "A팀", d["url"], d["start"], 5, 0, ctx.channel)
 
 @bot.command(name="타순")
-async def set_order(ctx, team: str, num: int, *, name):
+async def set_order(ctx, team: str, num: int, *, name: str):
     if not can_manage(ctx):
         return
     team_ref(team, "lineup").document(str(num)).set({"name": name})
-    await ctx.send(f"✅ {team} {num}번: {name}")
+    await ctx.send(f"✅ {get_team_name(team)} {num}번: {name}")
+
+@bot.command(name="교체")
+async def change_player(ctx, team: str, num: int, *, name: str):
+    await set_order(ctx, team, num, name=name)
 
 @bot.command(name="이벤트저장")
-async def save_event(ctx, team: str, key: str):
+async def save_event(ctx, key: str, filename: str):
     if not can_manage(ctx):
         return
-    team_ref(team, "events").document(key).set({"key": key})
-    await ctx.send(f"✅ 이벤트 저장: {team} / {key}")
+    db.collection("events").document(key).set({"file": filename})
+    await ctx.send(f"✅ 이벤트 저장: {key}")
+
+@bot.command(name="등장곡역할주기")
+async def give_role(ctx, member: discord.Member):
+    if not can_manage(ctx):
+        return
+    role = await get_or_create_role(ctx.guild)
+    await member.add_roles(role)
+    await ctx.send(f"🎧 역할 부여: {member.display_name}")
+
+@bot.command(name="등장곡역할회수")
+async def remove_role(ctx, member: discord.Member):
+    if not can_manage(ctx):
+        return
+    role = await get_or_create_role(ctx.guild)
+    await member.remove_roles(role)
+    await ctx.send(f"❌ 역할 회수: {member.display_name}")
 
 @bot.command(name="라인업")
-async def lineup(ctx, team: str):
-    embed = discord.Embed(title=f"⚾ {team} 라인업")
+async def lineup(ctx, team: str = "A팀"):
+    embed = discord.Embed(title=f"⚾ {get_team_name(team)} 라인업")
     for i in range(1, 10):
         d = team_ref(team, "lineup").document(str(i)).get()
         embed.add_field(
@@ -345,16 +358,18 @@ async def lineup(ctx, team: str):
 async def help_cmd(ctx):
     await ctx.send(
         "!입장 / !퇴장\n"
-        "!볼륨 팀 0~100\n"
+        "!팀 팀명 실제이름\n"
+        "!볼륨 팀명 0~100\n"
         "!저장 이름 / URL / 시작-끝\n"
         "!변경 이름 / URL / 시작-끝\n"
         "!미리듣기 이름\n"
-        "!타순 팀 번호 닉네임\n"
-        "!이벤트저장 팀 키\n"
-        "!라인업 팀명\n"
+        "!타순 팀명 번호 / 닉네임\n"
+        "!교체 팀명 번호 / 닉네임\n"
+        "!이벤트저장 키 파일명\n"
+        "!등장곡역할주기 @유저\n"
+        "!등장곡역할회수 @유저\n"
+        "!라인업 [팀명]\n"
+        "※ 음성 채널 비어있으면 자동 퇴장"
     )
 
-# =======================
-# RUN
-# =======================
 bot.run(TOKEN)
