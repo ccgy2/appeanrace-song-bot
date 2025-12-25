@@ -9,22 +9,22 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# =======================
+# ==================================================
 # ENV
-# =======================
+# ==================================================
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 FIREBASE_KEY = os.getenv("FIREBASE_SERVICE_ACCOUNT")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# =======================
-# 자동 퇴장 설정
-# =======================
+# ==================================================
+# 자동 음성 퇴장 설정
+# ==================================================
 VOICE_IDLE_SECONDS = 300
 
-# =======================
+# ==================================================
 # Firebase
-# =======================
+# ==================================================
 if not firebase_admin._apps:
     cred_dict = json.loads(FIREBASE_KEY)
     cred = credentials.Certificate(cred_dict)
@@ -32,28 +32,28 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# =======================
+# ==================================================
 # Discord
-# =======================
+# ==================================================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# =======================
+# ==================================================
 # 상수 / 상태
-# =======================
+# ==================================================
 ENTRANCE_ROLE_NAME = "등장곡 재생인"
 
-lineup_message = {}
+lineup_messages = {}
+now_playing_messages = {}
 idle_tasks = {}
-now_playing_message = {}
 
-# =======================
+# ==================================================
 # 권한
-# =======================
-def has_entrance_role(member):
+# ==================================================
+def has_entrance_role(member: discord.Member):
     return any(r.name == ENTRANCE_ROLE_NAME for r in member.roles)
 
 def can_manage(ctx):
@@ -69,15 +69,15 @@ async def get_or_create_role(guild):
         role = await guild.create_role(name=ENTRANCE_ROLE_NAME)
     return role
 
-# =======================
+# ==================================================
 # Firestore 구조
-# =======================
+# ==================================================
 # entranceSongs (공용)
 # events (공용)
 # teams/{team}/lineup
 # teams/{team}/state (volume, game)
-# teams_meta/{teamKey} -> 실제 팀명
-# =======================
+# teams_meta/{team} -> 실제 팀명
+# ==================================================
 def team_ref(team, path):
     return db.collection("teams").document(team).collection(path)
 
@@ -110,9 +110,9 @@ def game_state(team):
         ref.set({"currentOrder": 1})
     return ref
 
-# =======================
+# ==================================================
 # 음성 연결
-# =======================
+# ==================================================
 async def connect_voice(guild):
     if guild.voice_client:
         return guild.voice_client
@@ -121,9 +121,9 @@ async def connect_voice(guild):
             return await m.voice.channel.connect()
     return None
 
-# =======================
-# Embed
-# =======================
+# ==================================================
+# Embed (현재 재생)
+# ==================================================
 async def update_now_playing(channel, team, title, song):
     vol = int(get_volume(team) * 100)
     order = game_state(team).get().to_dict().get("currentOrder", "-")
@@ -136,15 +136,20 @@ async def update_now_playing(channel, team, title, song):
     embed.add_field(name="⚾ 타순", value=f"{order}번", inline=True)
 
     key = f"{channel.guild.id}_{team}"
-    if key not in now_playing_message:
-        now_playing_message[key] = await channel.send(embed=embed)
+    if key not in now_playing_messages:
+        now_playing_messages[key] = await channel.send(embed=embed)
     else:
-        await now_playing_message[key].edit(embed=embed)
+        await now_playing_messages[key].edit(embed=embed)
 
-# =======================
+# ==================================================
 # 오디오 (유튜브)
-# =======================
-YDL_OPTS = {"format": "bestaudio/best", "quiet": True}
+# ==================================================
+YDL_OPTS = {
+    "format": "bestaudio/best",
+    "quiet": True,
+    "nocheckcertificate": True,
+}
+
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
 async def play_youtube(guild, team, url, start, duration, order, channel):
@@ -184,14 +189,15 @@ async def play_song(guild, team, name, order, channel):
         order, channel
     )
 
-# =======================
-# 파일 사운드 (이벤트)
-# =======================
+# ==================================================
+# 이벤트 사운드 (파일)
+# ==================================================
 async def play_event_sound(guild, team, key, channel):
     doc = db.collection("events").document(key).get()
     if not doc.exists:
         await channel.send("❌ 이벤트 없음")
         return
+
     path = os.path.join("sounds", doc.to_dict()["file"])
     if not os.path.exists(path):
         await channel.send("❌ 파일 없음")
@@ -203,16 +209,41 @@ async def play_event_sound(guild, team, key, channel):
     if vc.is_playing():
         vc.stop()
 
-    vc.play(discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(path),
-        volume=get_volume(team)
-    ))
-
+    vc.play(
+        discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(path),
+            volume=get_volume(team)
+        )
+    )
     await update_now_playing(channel, team, "🎶 재생 중", key)
 
-# =======================
+# ==================================================
+# 자동 음성 퇴장
+# ==================================================
+async def idle_disconnect(guild):
+    await asyncio.sleep(VOICE_IDLE_SECONDS)
+    vc = guild.voice_client
+    if vc and len([m for m in vc.channel.members if not m.bot]) == 0:
+        await vc.disconnect()
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    guild = member.guild
+    vc = guild.voice_client
+
+    if vc and before.channel == vc.channel:
+        humans = [m for m in vc.channel.members if not m.bot]
+        if not humans and guild.id not in idle_tasks:
+            idle_tasks[guild.id] = asyncio.create_task(idle_disconnect(guild))
+
+    if after.channel and vc and after.channel == vc.channel:
+        task = idle_tasks.pop(guild.id, None)
+        if task:
+            task.cancel()
+
+# ==================================================
 # UI 버튼
-# =======================
+# ==================================================
 class Control(discord.ui.Button):
     def __init__(self, label, action, team):
         super().__init__(label=label, style=discord.ButtonStyle.primary)
@@ -221,8 +252,8 @@ class Control(discord.ui.Button):
 
     async def callback(self, interaction):
         await interaction.response.defer()
-        ch = interaction.channel
         guild = interaction.guild
+        ch = interaction.channel
 
         if self.action == "stop":
             if guild.voice_client:
@@ -248,9 +279,9 @@ class LineupView(discord.ui.View):
             self.add_item(Control(str(i), f"num{i}", team))
         self.add_item(Control("⏹ 정지", "stop", team))
 
-# =======================
+# ==================================================
 # 명령어
-# =======================
+# ==================================================
 @bot.command(name="입장")
 async def join(ctx):
     await connect_voice(ctx.guild)
@@ -309,15 +340,15 @@ async def preview(ctx, name: str):
     await play_youtube(ctx.guild, "A팀", d["url"], d["start"], 5, 0, ctx.channel)
 
 @bot.command(name="타순")
-async def set_order(ctx, team: str, num: int, *, name: str):
+async def set_order(ctx, team: str, num: int, *, nickname: str):
     if not can_manage(ctx):
         return
-    team_ref(team, "lineup").document(str(num)).set({"name": name})
-    await ctx.send(f"✅ {get_team_name(team)} {num}번: {name}")
+    team_ref(team, "lineup").document(str(num)).set({"name": nickname})
+    await ctx.send(f"✅ {get_team_name(team)} {num}번: {nickname}")
 
 @bot.command(name="교체")
-async def change_player(ctx, team: str, num: int, *, name: str):
-    await set_order(ctx, team, num, name=name)
+async def change_player(ctx, team: str, num: int, *, nickname: str):
+    await set_order(ctx, team, num, nickname=nickname)
 
 @bot.command(name="이벤트저장")
 async def save_event(ctx, key: str, filename: str):
@@ -372,4 +403,7 @@ async def help_cmd(ctx):
         "※ 음성 채널 비어있으면 자동 퇴장"
     )
 
+# ==================================================
+# RUN
+# ==================================================
 bot.run(TOKEN)
