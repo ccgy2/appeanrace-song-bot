@@ -441,7 +441,7 @@ class LineupView(discord.ui.View):
         self.add_item(Control("❌ 삼진", "strikeout"))
         self.add_item(Control("🐦‍🔥 플라이", "fly"))
         self.add_item(Control("🧤 아웃", "out"))
-        self.add_item(Control("🤓 도루성공", "stil"))
+        self.add_item(Control("🤓 도루성공", "steal"))
         self.add_item(Control("⚾ 득점", "score"))
         self.add_item(Control("🔁 이닝교대", "inning_change"))
         self.add_item(Control("🛑 경기종료", "game_end"))
@@ -498,5 +498,6 @@ async def help_cmd(ctx):
     )
 
 bot.run(TOKEN)
+
 
 
