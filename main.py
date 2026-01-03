@@ -15,6 +15,8 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 FIREBASE_KEY = os.getenv("FIREBASE_SERVICE_ACCOUNT")
+
+# 🔴 본인 디스코드 ID (환경변수 OWNER_ID로 설정 가능)
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # =======================
@@ -49,7 +51,6 @@ current_team = {}
 lineup_message = {}
 idle_countdown_tasks = {}
 now_playing_message = {}
-last_text_channel = {}  # 🔥 마지막 사용 텍스트 채널 저장
 
 ENTRANCE_ROLE_NAME = "등장곡 재생인"
 
@@ -72,7 +73,11 @@ def has_entrance_role(member):
     return any(r.name == ENTRANCE_ROLE_NAME for r in member.roles)
 
 def can_manage(ctx):
-    return is_admin(ctx) or has_entrance_role(ctx.author) or ctx.author.id == OWNER_ID
+    return (
+        is_admin(ctx)
+        or has_entrance_role(ctx.author)
+        or ctx.author.id == OWNER_ID
+    )
 
 async def get_or_create_role(guild):
     role = discord.utils.get(guild.roles, name=ENTRANCE_ROLE_NAME)
@@ -80,13 +85,18 @@ async def get_or_create_role(guild):
         role = await guild.create_role(name=ENTRANCE_ROLE_NAME)
     return role
 
-# =======================
-# 음성 연결
-# =======================
-async def connect_voice_by_guild(guild, voice_channel):
+async def connect_voice_by_guild(guild, channel=None):
     if guild.voice_client:
         return guild.voice_client
-    return await voice_channel.connect()
+    for m in guild.members:
+        if m.voice:
+            vc = await m.voice.channel.connect()
+            if channel:
+                await channel.send(f"🔊 음성 채널 연결: {m.voice.channel.name}")
+            return vc
+    if channel:
+        await channel.send("❌ 음성 채널에 아무도 없음")
+    return None
 
 # =======================
 # 볼륨
@@ -114,13 +124,9 @@ def game_state(team):
     return ref
 
 # =======================
-# Embed (🔥 텍스트 채널 고정)
+# Embed
 # =======================
-async def update_now_playing_embed(guild_id, title, song, countdown=None):
-    if guild_id not in last_text_channel:
-        return
-
-    channel = last_text_channel[guild_id]
+async def update_now_playing_embed(channel, guild_id, title, song, countdown=None):
     team = get_team(guild_id)
     volume = int(get_volume(team) * 100)
     order = game_state(team).get().to_dict().get("currentOrder", "-")
@@ -140,7 +146,7 @@ async def update_now_playing_embed(guild_id, title, song, countdown=None):
         await now_playing_message[guild_id].edit(embed=embed)
 
 # =======================
-# 오디오
+# 오디오 (유튜브)
 # =======================
 YDL_OPTS = {
     "format": "bestaudio/best",
@@ -152,8 +158,8 @@ YDL_OPTS = {
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
-async def play_youtube(guild, team, url, start, duration, order=None):
-    vc = guild.voice_client
+async def play_youtube(guild, team, url, start, duration, order=None, channel=None):
+    vc = await connect_voice_by_guild(guild, channel)
     if vc is None:
         return
 
@@ -179,30 +185,59 @@ async def play_youtube(guild, team, url, start, duration, order=None):
     if order is not None:
         game_state(team).update({"currentOrder": order})
 
-    await update_now_playing_embed(guild.id, "🎶 재생 중", "유튜브 등장곡")
+    if channel:
+        await update_now_playing_embed(channel, guild.id, "🎶 재생 중", "유튜브 등장곡")
 
-async def play_song(guild, team, name, order):
+async def play_song(guild, team, name, order, channel):
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
+        await channel.send(f"❌ 등장곡 없음: {name}")
         return
     d = doc.to_dict()
     await play_youtube(
         guild, team,
         d["url"], d["start"], d["end"] - d["start"],
-        order
+        order, channel
+    )
+
+# =======================
+# 파일 사운드
+# =======================
+async def play_local_sound(guild, team, folder, channel):
+    base = os.path.join("sounds", folder)
+    if not os.path.exists(base):
+        return
+    files = [f for f in os.listdir(base) if f.lower().endswith((".mp3", ".wav", ".ogg"))]
+    if not files:
+        return
+    filename = random.choice(files)
+    path = os.path.join(base, filename)
+
+    vc = await connect_voice_by_guild(guild, channel)
+    if vc is None:
+        return
+    if vc.is_playing():
+        vc.stop()
+
+    vc.play(discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(path),
+        volume=get_volume(team)
+    ))
+
+    await update_now_playing_embed(
+        channel, guild.id, "🎶 재생 중", f"{folder}/{filename}"
     )
 
 # =======================
 # 자동 퇴장
 # =======================
-async def start_idle_countdown(guild):
+async def start_idle_countdown(guild, channel):
     for remaining in range(VOICE_IDLE_SECONDS, 0, -1):
         vc = guild.voice_client
         if not vc or [m for m in vc.channel.members if not m.bot]:
             return
         await update_now_playing_embed(
-            guild.id,
-            "⏸ 대기 중",
+            channel, guild.id, "⏸ 대기 중",
             "음성 채널에 사람이 없습니다",
             countdown=remaining
         )
@@ -221,12 +256,13 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     guild = member.guild
     vc = guild.voice_client
+    channel = guild.text_channels[0]
 
     if vc and before.channel == vc.channel:
         humans = [m for m in vc.channel.members if not m.bot]
         if not humans and guild.id not in idle_countdown_tasks:
             idle_countdown_tasks[guild.id] = asyncio.create_task(
-                start_idle_countdown(guild)
+                start_idle_countdown(guild, channel)
             )
 
     if after.channel and vc and after.channel == vc.channel:
@@ -244,7 +280,8 @@ async def on_voice_state_update(member, before, after):
                 if d.to_dict().get("name") == nickname:
                     await play_song(
                         member.guild, team,
-                        nickname, int(d.id)
+                        nickname, int(d.id),
+                        channel
                     )
                     return
 
@@ -253,35 +290,21 @@ async def on_voice_state_update(member, before, after):
 # =======================
 @bot.command(name="입장")
 async def join(ctx):
-    last_text_channel[ctx.guild.id] = ctx.channel
-
-    if not ctx.author.voice:
-        await ctx.send("❌ 먼저 음성 채널에 들어가 주세요")
-        return
-
-    if ctx.guild.voice_client:
-        await ctx.guild.voice_client.move_to(ctx.author.voice.channel)
-    else:
-        await ctx.author.voice.channel.connect()
-
-    await ctx.send(f"🔊 음성 채널 입장: {ctx.author.voice.channel.name}")
+    await connect_voice_by_guild(ctx.guild, ctx.channel)
 
 @bot.command(name="퇴장")
 async def leave(ctx):
-    last_text_channel[ctx.guild.id] = ctx.channel
     if ctx.guild.voice_client:
         await ctx.guild.voice_client.disconnect()
         await ctx.send("🔇 음성 채널 퇴장")
 
 @bot.command(name="팀")
 async def set_team(ctx, team: str):
-    last_text_channel[ctx.guild.id] = ctx.channel
     current_team[ctx.guild.id] = team
     await ctx.send(f"✅ 현재 팀: {team}")
 
 @bot.command(name="볼륨")
 async def volume(ctx, value: int):
-    last_text_channel[ctx.guild.id] = ctx.channel
     if not can_manage(ctx):
         return
     if 0 <= value <= 100:
@@ -349,35 +372,6 @@ async def change_player(ctx, num: int, *, args):
     team_ref(team, "lineup").document(str(num)).set({"name": new.strip()})
     await ctx.send(f"🔄 {num}번 교체: {new.strip()}")
     await refresh_lineup(ctx)
-
-# =======================
-# 🔥 이름 변경 (데이터 유지)
-# =======================
-@bot.command(name="이름변경")
-async def rename_player(ctx, old_name: str, new_name: str):
-    if not can_manage(ctx):
-        return
-
-    team = get_team(ctx.guild.id)
-    changed = False
-
-    for d in team_ref(team, "lineup").stream():
-        if d.to_dict().get("name") == old_name:
-            team_ref(team, "lineup").document(d.id).update({"name": new_name})
-            changed = True
-
-    old_doc = team_ref(team, "entranceSongs").document(old_name)
-    if old_doc.get().exists:
-        data = old_doc.get().to_dict()
-        team_ref(team, "entranceSongs").document(new_name).set(data)
-        old_doc.delete()
-        changed = True
-
-    if changed:
-        await ctx.send(f"✅ 이름 변경 완료: {old_name} → {new_name}")
-        await refresh_lineup(ctx)
-    else:
-        await ctx.send("❌ 해당 이름을 찾을 수 없습니다")
 
 @bot.command(name="이벤트저장")
 async def save_event(ctx, key: str, filename: str):
@@ -503,10 +497,8 @@ async def help_cmd(ctx):
         "!이벤트저장 키 파일명\n"
         "!등장곡역할주기 @유저\n"
         "!등장곡역할회수 @유저\n"
-        "!이름변경 기존닉 새닉\n"
         "!라인업\n"
         "※ 관리자 / 등장곡 재생인 / OWNER_ID 가능"
     )
 
 bot.run(TOKEN)
-
