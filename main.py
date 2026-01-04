@@ -373,6 +373,35 @@ async def change_player(ctx, num: int, *, args):
     await ctx.send(f"🔄 {num}번 교체: {new.strip()}")
     await refresh_lineup(ctx)
 
+# =======================
+# 🔥 이름 변경 (데이터 유지)
+# =======================
+@bot.command(name="이름변경")
+async def rename_player(ctx, old_name: str, new_name: str):
+    if not can_manage(ctx):
+        return
+
+    team = get_team(ctx.guild.id)
+    changed = False
+
+    for d in team_ref(team, "lineup").stream():
+        if d.to_dict().get("name") == old_name:
+            team_ref(team, "lineup").document(d.id).update({"name": new_name})
+            changed = True
+
+    old_doc = team_ref(team, "entranceSongs").document(old_name)
+    if old_doc.get().exists:
+        data = old_doc.get().to_dict()
+        team_ref(team, "entranceSongs").document(new_name).set(data)
+        old_doc.delete()
+        changed = True
+
+    if changed:
+        await ctx.send(f"✅ 이름 변경 완료: {old_name} → {new_name}")
+        await refresh_lineup(ctx)
+    else:
+        await ctx.send("❌ 해당 이름을 찾을 수 없습니다")
+
 @bot.command(name="이벤트저장")
 async def save_event(ctx, key: str, filename: str):
     if not can_manage(ctx):
@@ -497,6 +526,7 @@ async def help_cmd(ctx):
         "!이벤트저장 키 파일명\n"
         "!등장곡역할주기 @유저\n"
         "!등장곡역할회수 @유저\n"
+        "!이름변경 기존닉 새닉\n"
         "!라인업\n"
         "※ 관리자 / 등장곡 재생인 / OWNER_ID 가능"
     )
