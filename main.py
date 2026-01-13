@@ -435,6 +435,7 @@ class LineupView(discord.ui.View):
         super().__init__(timeout=None)
         for i in range(1, 10):
             self.add_item(Control(str(i), f"num{i}"))
+	self.add_item(Control("다음 타자", "next")
         self.add_item(Control("📋 라인업 송", "lineup"))
         self.add_item(Control("💥 홈런", "homerun"))
         # self.add_item(Control("💥 홈런2", "homerun2"))
