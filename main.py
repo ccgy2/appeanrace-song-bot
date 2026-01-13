@@ -19,16 +19,21 @@ FIREBASE_KEY = os.getenv("FIREBASE_SERVICE_ACCOUNT")
 # 🔴 본인 디스코드 ID (환경변수 OWNER_ID로 설정 가능)
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# (선택) yt-dlp 쿠키 파일 경로 (403/Cloudflare 막힘 대비)
+YTDLP_COOKIES_PATH = os.getenv("YTDLP_COOKIES_PATH", "").strip()
+
 # =======================
 # 자동 퇴장 설정값
 # =======================
 VOICE_IDLE_SECONDS = 300
-WARNING_SECONDS = 30
+WARNING_SECONDS = 30  # 지금은 미사용이지만 그대로 둠(요청: 삭제 금지)
 
 # =======================
 # Firebase
 # =======================
 if not firebase_admin._apps:
+    if not FIREBASE_KEY:
+        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT 환경변수가 비어있습니다.")
     cred_dict = json.loads(FIREBASE_KEY)
     cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred)
@@ -85,15 +90,49 @@ async def get_or_create_role(guild):
         role = await guild.create_role(name=ENTRANCE_ROLE_NAME)
     return role
 
-async def connect_voice_by_guild(guild, channel=None):
+def get_default_text_channel(guild: discord.Guild):
+    """
+    guild.text_channels[0]는 서버 설정/권한에 따라 실패할 수 있음.
+    보낼 수 있는 채널을 하나 골라서 반환.
+    """
+    if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+        return guild.system_channel
+    for ch in guild.text_channels:
+        perms = ch.permissions_for(guild.me)
+        if perms.send_messages:
+            return ch
+    return None
+
+async def connect_voice_by_guild(guild, channel=None, preferred_member: discord.Member = None):
+    """
+    - 이미 연결돼 있으면 그대로 반환
+    - preferred_member가 음성채널에 있으면 그 채널로 연결
+    - 아니면 길드 멤버 중 음성채널에 있는 사람 찾아 연결
+    """
     if guild.voice_client:
         return guild.voice_client
-    for m in guild.members:
-        if m.voice:
-            vc = await m.voice.channel.connect()
+
+    try:
+        if preferred_member and preferred_member.voice and preferred_member.voice.channel:
+            vc = await preferred_member.voice.channel.connect()
             if channel:
-                await channel.send(f"🔊 음성 채널 연결: {m.voice.channel.name}")
+                await channel.send(f"🔊 음성 채널 연결: {preferred_member.voice.channel.name}")
             return vc
+    except Exception as e:
+        if channel:
+            await channel.send(f"❌ 음성 채널 연결 실패(preferred): {e}")
+        return None
+
+    for m in guild.members:
+        try:
+            if m.voice and m.voice.channel:
+                vc = await m.voice.channel.connect()
+                if channel:
+                    await channel.send(f"🔊 음성 채널 연결: {m.voice.channel.name}")
+                return vc
+        except Exception:
+            continue
+
     if channel:
         await channel.send("❌ 음성 채널에 아무도 없음")
     return None
@@ -140,89 +179,180 @@ async def update_now_playing_embed(channel, guild_id, title, song, countdown=Non
     if countdown is not None:
         embed.set_footer(text=f"⏱ 자동 퇴장까지 {countdown}초")
 
+    if channel is None:
+        return
+
     if guild_id not in now_playing_message:
         now_playing_message[guild_id] = await channel.send(embed=embed)
     else:
-        await now_playing_message[guild_id].edit(embed=embed)
+        try:
+            await now_playing_message[guild_id].edit(embed=embed)
+        except discord.NotFound:
+            now_playing_message[guild_id] = await channel.send(embed=embed)
 
 # =======================
 # 오디오 (유튜브)
 # =======================
+# 유튜브/yt-dlp 이슈 대응: player_client 지정 + noplaylist + 쿠키 옵션 + 에러 로깅 강화
 YDL_OPTS = {
     "format": "bestaudio/best",
     "quiet": True,
+    "no_warnings": True,
     "nocheckcertificate": True,
-    "socket_timeout": 10,
-    "source_address": "0.0.0.0"
+    "socket_timeout": 15,
+    "source_address": "0.0.0.0",
+    "noplaylist": True,
+    "extractor_retries": 3,
+    "retries": 3,
+    # 유튜브가 특정 클라이언트 차단/DRM/403 걸 때 우회에 도움 되는 경우가 많음
+    # (환경에 따라 web/android 조합이 더 잘 될 때가 있음)
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"]
+        }
+    },
 }
+
+if YTDLP_COOKIES_PATH:
+    YDL_OPTS["cookiefile"] = YTDLP_COOKIES_PATH
 
 FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 
-async def play_youtube(guild, team, url, start, duration, order=None, channel=None):
-    vc = await connect_voice_by_guild(guild, channel)
+def _pick_audio_url(info: dict):
+    """
+    yt-dlp 결과에서 실제 오디오 스트림 URL을 최대한 안전하게 고름.
+    info['url']이 없거나 formats만 있는 경우 대응.
+    """
+    if not info:
+        return None
+
+    # 플레이리스트/검색 결과 entries
+    if "entries" in info and isinstance(info["entries"], list) and info["entries"]:
+        info = info["entries"][0]
+
+    if isinstance(info, dict) and info.get("url"):
+        return info["url"]
+
+    fmts = info.get("formats") if isinstance(info, dict) else None
+    if not fmts:
+        return None
+
+    # audio-only 우선
+    audio_only = [f for f in fmts if f.get("vcodec") == "none" and f.get("acodec") != "none" and f.get("url")]
+    if audio_only:
+        # abr(오디오 비트레이트) 높은 것 우선
+        audio_only.sort(key=lambda x: (x.get("abr") or 0), reverse=True)
+        return audio_only[0].get("url")
+
+    # fallback: url 있는 것 중 하나
+    any_url = [f for f in fmts if f.get("url")]
+    if any_url:
+        return any_url[0].get("url")
+
+    return None
+
+async def play_youtube(guild, team, url, start, duration, order=None, channel=None, preferred_member: discord.Member = None):
+    vc = await connect_voice_by_guild(guild, channel, preferred_member=preferred_member)
     if vc is None:
         return
 
     if vc.is_playing():
         vc.stop()
 
-    with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-        info = ydl.extract_info(url, download=False)
-        audio_url = info["url"]
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(url, download=False)
+            audio_url = _pick_audio_url(info)
 
-    vc.play(
-        discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                audio_url,
-                executable="ffmpeg",
-                before_options=f"{FFMPEG_BEFORE} -ss {start}",
-                options=f"-t {duration} -vn"
-            ),
-            volume=get_volume(team)
+        if not audio_url:
+            if channel:
+                await channel.send("❌ 유튜브 오디오 URL 추출 실패 (formats/url 없음)")
+            return
+
+    except Exception as e:
+        if channel:
+            await channel.send(f"❌ 유튜브 추출 실패: {e}")
+        print(f"[yt-dlp error] {e}")
+        return
+
+    try:
+        source = discord.FFmpegPCMAudio(
+            audio_url,
+            executable="ffmpeg",
+            before_options=f"{FFMPEG_BEFORE} -ss {start}",
+            options=f"-t {duration} -vn"
         )
-    )
+        vc.play(
+            discord.PCMVolumeTransformer(
+                source,
+                volume=get_volume(team)
+            )
+        )
+    except Exception as e:
+        if channel:
+            await channel.send(f"❌ ffmpeg 재생 실패: {e}")
+        print(f"[ffmpeg error] {e}")
+        return
 
     if order is not None:
-        game_state(team).update({"currentOrder": order})
+        try:
+            game_state(team).update({"currentOrder": order})
+        except Exception as e:
+            print(f"[firestore game_state update error] {e}")
 
     if channel:
         await update_now_playing_embed(channel, guild.id, "🎶 재생 중", "유튜브 등장곡")
 
-async def play_song(guild, team, name, order, channel):
+async def play_song(guild, team, name, order, channel, preferred_member: discord.Member = None):
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
-        await channel.send(f"❌ 등장곡 없음: {name}")
+        if channel:
+            await channel.send(f"❌ 등장곡 없음: {name}")
         return
     d = doc.to_dict()
     await play_youtube(
         guild, team,
         d["url"], d["start"], d["end"] - d["start"],
-        order, channel
+        order, channel, preferred_member=preferred_member
     )
 
 # =======================
 # 파일 사운드
 # =======================
-async def play_local_sound(guild, team, folder, channel):
+async def play_local_sound(guild, team, folder, channel, preferred_member: discord.Member = None):
     base = os.path.join("sounds", folder)
     if not os.path.exists(base):
+        if channel:
+            await channel.send(f"❌ 로컬 사운드 폴더 없음: {base}")
         return
+
     files = [f for f in os.listdir(base) if f.lower().endswith((".mp3", ".wav", ".ogg"))]
     if not files:
+        if channel:
+            await channel.send(f"❌ 로컬 사운드 파일 없음: {base}")
         return
+
     filename = random.choice(files)
     path = os.path.join(base, filename)
 
-    vc = await connect_voice_by_guild(guild, channel)
+    vc = await connect_voice_by_guild(guild, channel, preferred_member=preferred_member)
     if vc is None:
         return
     if vc.is_playing():
         vc.stop()
 
-    vc.play(discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(path),
-        volume=get_volume(team)
-    ))
+    try:
+        vc.play(
+            discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(path),
+                volume=get_volume(team)
+            )
+        )
+    except Exception as e:
+        if channel:
+            await channel.send(f"❌ 로컬 사운드 재생 실패: {e}")
+        print(f"[local sound error] {e}")
+        return
 
     await update_now_playing_embed(
         channel, guild.id, "🎶 재생 중", f"{folder}/{filename}"
@@ -234,16 +364,27 @@ async def play_local_sound(guild, team, folder, channel):
 async def start_idle_countdown(guild, channel):
     for remaining in range(VOICE_IDLE_SECONDS, 0, -1):
         vc = guild.voice_client
-        if not vc or [m for m in vc.channel.members if not m.bot]:
+        if not vc:
             return
+
+        # 사람이 들어오면 중단
+        humans = [m for m in vc.channel.members if not m.bot]
+        if humans:
+            return
+
         await update_now_playing_embed(
             channel, guild.id, "⏸ 대기 중",
             "음성 채널에 사람이 없습니다",
             countdown=remaining
         )
         await asyncio.sleep(1)
+
+    # 끝까지 사람이 없으면 퇴장
     if guild.voice_client:
-        await guild.voice_client.disconnect()
+        try:
+            await guild.voice_client.disconnect()
+        except Exception as e:
+            print(f"[disconnect error] {e}")
 
 # =======================
 # 이벤트
@@ -251,46 +392,61 @@ async def start_idle_countdown(guild, channel):
 @bot.event
 async def on_ready():
     print("🔥 Railway 등장곡 봇 실행 완료")
+    # 혹시 View가 재시작 후에도 살아있게 하려면 add_view 가능 (timeout=None일 때)
+    try:
+        bot.add_view(LineupView())
+    except Exception:
+        pass
 
 @bot.event
 async def on_voice_state_update(member, before, after):
     guild = member.guild
     vc = guild.voice_client
-    channel = guild.text_channels[0]
+    channel = get_default_text_channel(guild)
 
+    # 사람이 다 나가면 카운트다운 시작
     if vc and before.channel == vc.channel:
         humans = [m for m in vc.channel.members if not m.bot]
         if not humans and guild.id not in idle_countdown_tasks:
-            idle_countdown_tasks[guild.id] = asyncio.create_task(
-                start_idle_countdown(guild, channel)
-            )
+            if channel:
+                idle_countdown_tasks[guild.id] = asyncio.create_task(
+                    start_idle_countdown(guild, channel)
+                )
 
+    # 사람이 들어오면 카운트다운 취소
     if after.channel and vc and after.channel == vc.channel:
         task = idle_countdown_tasks.pop(guild.id, None)
         if task:
             task.cancel()
 
+    # 등장 시 자동 등장곡
     if before.channel is None and after.channel is not None:
         if not has_entrance_role(member):
             return
+
         nickname = member.display_name
-        for team_doc in db.collection("teams").stream():
-            team = team_doc.id
-            for d in team_ref(team, "lineup").stream():
-                if d.to_dict().get("name") == nickname:
-                    await play_song(
-                        member.guild, team,
-                        nickname, int(d.id),
-                        channel
-                    )
-                    return
+
+        try:
+            for team_doc in db.collection("teams").stream():
+                team = team_doc.id
+                for d in team_ref(team, "lineup").stream():
+                    if d.to_dict().get("name") == nickname:
+                        await play_song(
+                            member.guild, team,
+                            nickname, int(d.id),
+                            channel,
+                            preferred_member=member
+                        )
+                        return
+        except Exception as e:
+            print(f"[on_voice_state_update firestore error] {e}")
 
 # =======================
 # 명령어
 # =======================
 @bot.command(name="입장")
 async def join(ctx):
-    await connect_voice_by_guild(ctx.guild, ctx.channel)
+    await connect_voice_by_guild(ctx.guild, ctx.channel, preferred_member=ctx.author)
 
 @bot.command(name="퇴장")
 async def leave(ctx):
@@ -314,11 +470,13 @@ async def volume(ctx, value: int):
 def parse_song(args):
     name, url, tr = [x.strip() for x in args.split(" / ", 2)]
     a, b = tr.replace("-", "~").split("~")
+
     def sec(t):
         if ":" in t:
             m, s = t.split(":")
             return int(m) * 60 + int(s)
         return int(t)
+
     return name, url.split("&")[0], sec(a), sec(b)
 
 @bot.command(name="저장")
@@ -351,7 +509,7 @@ async def preview(ctx, name: str):
         await ctx.send("❌ 등장곡 없음")
         return
     d = doc.to_dict()
-    await play_youtube(ctx.guild, team, d["url"], d["start"], 5, None, ctx.channel)
+    await play_youtube(ctx.guild, team, d["url"], d["start"], 5, None, ctx.channel, preferred_member=ctx.author)
 
 @bot.command(name="타순")
 async def set_order(ctx, num: int, *, args):
@@ -404,7 +562,7 @@ class Control(discord.ui.Button):
         super().__init__(label=label, style=discord.ButtonStyle.primary)
         self.action = action
 
-    async def callback(self, interaction):
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         team = get_team(interaction.guild.id)
         ch = interaction.channel
@@ -418,24 +576,52 @@ class Control(discord.ui.Button):
                 )
             return
 
+        if self.action == "next":
+            # 현재 타순 +1로 이동(9 넘어가면 1)
+            st = game_state(team).get().to_dict()
+            cur = int(st.get("currentOrder", 1))
+            nxt = cur + 1
+            if nxt > 9:
+                nxt = 1
+
+            doc = team_ref(team, "lineup").document(str(nxt)).get()
+            if doc.exists:
+                name = doc.to_dict().get("name")
+                if name:
+                    await play_song(
+                        interaction.guild, team,
+                        name, nxt, ch,
+                        preferred_member=interaction.user if isinstance(interaction.user, discord.Member) else None
+                    )
+            await refresh_lineup(interaction)
+            return
+
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(team, "lineup").document(str(order)).get()
             if doc.exists:
-                await play_song(
-                    interaction.guild, team,
-                    doc.to_dict()["name"], order, ch
-                )
+                name = doc.to_dict().get("name")
+                if name:
+                    await play_song(
+                        interaction.guild, team,
+                        name, order, ch,
+                        preferred_member=interaction.user if isinstance(interaction.user, discord.Member) else None
+                    )
                 await refresh_lineup(interaction)
-        else:
-            await play_local_sound(interaction.guild, team, self.action, ch)
+            return
+
+        # 로컬 효과음
+        await play_local_sound(
+            interaction.guild, team, self.action, ch,
+            preferred_member=interaction.user if isinstance(interaction.user, discord.Member) else None
+        )
 
 class LineupView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         for i in range(1, 10):
             self.add_item(Control(str(i), f"num{i}"))
-	self.add_item(Control("다음 타자", "next")
+        self.add_item(Control("다음 타자", "next"))
         self.add_item(Control("📋 라인업 송", "lineup"))
         self.add_item(Control("💥 홈런", "homerun"))
         # self.add_item(Control("💥 홈런2", "homerun2"))
@@ -501,5 +687,8 @@ async def help_cmd(ctx):
         "!라인업\n"
         "※ 관리자 / 등장곡 재생인 / OWNER_ID 가능"
     )
+
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN 환경변수가 비어있습니다.")
 
 bot.run(TOKEN)
