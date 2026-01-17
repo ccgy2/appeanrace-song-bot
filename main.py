@@ -168,7 +168,7 @@ async def update_now_playing_embed(channel, guild_id, title, song, countdown=Non
             now_playing_message[guild_id] = await channel.send(embed=embed)
 
 # =======================
-# ✅ (추가) 쿠키 준비 (B64 -> /tmp 파일)
+# ✅ 쿠키 준비 (B64 -> /tmp 파일)
 # =======================
 def prepare_ytdlp_cookies_file():
     """
@@ -209,7 +209,6 @@ YDL_OPTS = {
     "noplaylist": True,
     "extractor_retries": 3,
     "retries": 3,
-    # 유튜브 차단/서명 처리 강화
     "extractor_args": {
         "youtube": {
             "player_client": ["android", "web"]
@@ -355,6 +354,65 @@ async def start_idle_countdown(guild, channel):
         await asyncio.sleep(1)
     if guild.voice_client:
         await guild.voice_client.disconnect()
+
+# =======================
+# ✅ 이름 변경 (데이터 손실 없이 문서ID/필드만 변경)
+# =======================
+def rename_player_in_team(team: str, old_name: str, new_name: str):
+    """
+    - entranceSongs/{old_name} -> entranceSongs/{new_name}로 복사 후 old 삭제 (데이터 유지)
+    - lineup/{1~9} 문서들의 name 값에서 old_name -> new_name 변경
+    """
+    old_name = (old_name or "").strip()
+    new_name = (new_name or "").strip()
+
+    if not old_name or not new_name:
+        return False, "이름이 비어있습니다."
+    if old_name == new_name:
+        return False, "기존 이름과 새 이름이 같습니다."
+
+    # 1) entranceSongs 문서 rename
+    songs_col = team_ref(team, "entranceSongs")
+    old_doc_ref = songs_col.document(old_name)
+    new_doc_ref = songs_col.document(new_name)
+
+    old_doc = old_doc_ref.get()
+    new_doc = new_doc_ref.get()
+
+    # 새 문서가 이미 있으면 덮어쓰기 위험 -> 막음
+    if new_doc.exists:
+        return False, f"새 이름({new_name})의 등장곡 문서가 이미 존재합니다. (중복)"
+
+    # old가 없을 수도 있음(등장곡 저장 안 했거나 다른 케이스). 그럼 lineup만 처리
+    batch = db.batch()
+
+    if old_doc.exists:
+        data = old_doc.to_dict()
+        batch.set(new_doc_ref, data)
+        batch.delete(old_doc_ref)
+
+    # 2) lineup name 치환
+    lineup_col = team_ref(team, "lineup")
+    changed_lineup = 0
+    for i in range(1, 10):
+        ref = lineup_col.document(str(i))
+        doc = ref.get()
+        if doc.exists:
+            d = doc.to_dict() or {}
+            if d.get("name") == old_name:
+                batch.set(ref, {"name": new_name}, merge=True)
+                changed_lineup += 1
+
+    batch.commit()
+
+    info = []
+    if old_doc.exists:
+        info.append("등장곡 문서 이름 변경 완료")
+    else:
+        info.append("등장곡 문서가 없어서(미저장) 스킵")
+
+    info.append(f"라인업 변경 {changed_lineup}개")
+    return True, " / ".join(info)
 
 # =======================
 # 이벤트
@@ -513,6 +571,43 @@ async def remove_role(ctx, member: discord.Member):
     await ctx.send(f"❌ 역할 회수: {member.display_name}")
 
 # =======================
+# ✅ 새 명령어: 이름변경
+# 사용법:
+# 1) !이름변경 새닉네임            -> 본인 이름(현재 display_name 기준) 변경
+# 2) !이름변경 기존닉네임 / 새닉네임 -> (관리자/권한자) 특정 이름 변경
+# =======================
+@bot.command(name="이름변경")
+async def rename_name(ctx, *, args: str):
+    team = get_team(ctx.guild.id)
+
+    args = (args or "").strip()
+    if not args:
+        await ctx.send("❌ 사용법: `!이름변경 새닉네임` 또는 `!이름변경 기존닉 / 새닉`")
+        return
+
+    # 2개 인자(기존/새) 형태면 관리자만 허용
+    if " / " in args:
+        if not can_manage(ctx):
+            await ctx.send("❌ 권한이 없습니다. (관리자/등장곡 재생인/OWNER_ID만 가능)")
+            return
+        try:
+            old_name, new_name = [x.strip() for x in args.split(" / ", 1)]
+        except Exception:
+            await ctx.send("❌ 사용법: `!이름변경 기존닉 / 새닉`")
+            return
+    else:
+        # 1개 인자면 본인 이름 변경 (권한 없어도 가능)
+        old_name = ctx.author.display_name
+        new_name = args.strip()
+
+    ok, msg = rename_player_in_team(team, old_name, new_name)
+    if ok:
+        await ctx.send(f"✅ 이름변경 완료: **{old_name}** → **{new_name}**\n({msg})")
+        await refresh_lineup(ctx)
+    else:
+        await ctx.send(f"❌ 이름변경 실패: {msg}")
+
+# =======================
 # UI
 # =======================
 class Control(discord.ui.Button):
@@ -611,6 +706,8 @@ async def help_cmd(ctx):
         "!이벤트저장 키 파일명\n"
         "!등장곡역할주기 @유저\n"
         "!등장곡역할회수 @유저\n"
+        "!이름변경 새닉네임\n"
+        "!이름변경 기존닉 / 새닉\n"
         "!라인업\n"
         "※ 관리자 / 등장곡 재생인 / OWNER_ID 가능"
     )
