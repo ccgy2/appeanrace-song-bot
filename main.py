@@ -254,8 +254,8 @@ def _pick_audio_url(info: dict):
 
     return None
 
-async def play_youtube(guild, team, url, start, duration, order=None, channel=None):
-    vc = await connect_voice_by_guild(guild, channel)
+async def play_youtube(guild, team, url, start, duration, order=None, channel=None, voice_channel=None):
+    vc = await connect_voice_to_channel(guild, voice_channel, channel)
     if vc is None:
         return
 
@@ -306,7 +306,7 @@ async def play_youtube(guild, team, url, start, duration, order=None, channel=No
     if channel:
         await update_now_playing_embed(channel, guild.id, "🎶 재생 중", "유튜브 등장곡")
 
-async def play_song(guild, team, name, order, channel):
+async def play_song(guild, team, name, order, channel, voice_channel):
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
         await channel.send(f"❌ 등장곡 없음: {name}")
@@ -315,7 +315,7 @@ async def play_song(guild, team, name, order, channel):
     await play_youtube(
         guild, team,
         d["url"], d["start"], d["end"] - d["start"],
-        order, channel
+        order, channel, voice_channel
     )
 
 # =======================
@@ -435,35 +435,57 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    # 봇 자신의 음성 상태 변경은 무시
+    if member.bot:
+        return
+
     guild = member.guild
     vc = guild.voice_client
     channel = get_default_text_channel(guild)
 
-    if vc and before.channel == vc.channel:
+    # =======================
+    # 1) 사람이 봇이 있는 채널에서 나갔을 때: 자동 퇴장 카운트다운 시작
+    # =======================
+    if vc and before.channel and vc.channel and before.channel.id == vc.channel.id:
         humans = [m for m in vc.channel.members if not m.bot]
-        if not humans and guild.id not in idle_countdown_tasks and channel:
-            idle_countdown_tasks[guild.id] = asyncio.create_task(
-                start_idle_countdown(guild, channel)
-            )
+        if len(humans) == 0:
+            old_task = idle_countdown_tasks.get(guild.id)
+            if old_task is None or old_task.done():
+                if channel:
+                    idle_countdown_tasks[guild.id] = asyncio.create_task(
+                        start_idle_countdown(guild, channel)
+                    )
 
-    if after.channel and vc and after.channel == vc.channel:
+    # =======================
+    # 2) 사람이 봇이 있는 채널로 들어왔을 때: 카운트다운 취소
+    # =======================
+    if vc and after.channel and vc.channel and after.channel.id == vc.channel.id:
         task = idle_countdown_tasks.pop(guild.id, None)
         if task:
             task.cancel()
 
+    # =======================
+    # 3) "새로 음성 채널 입장"했을 때만 등장곡 재생
+    #    (방 이동은 제외하고 싶으면 before.channel is None 조건 유지)
+    # =======================
     if before.channel is None and after.channel is not None:
         if not has_entrance_role(member):
             return
+
         nickname = member.display_name
+
         for team_doc in db.collection("teams").stream():
             team = team_doc.id
             for d in team_ref(team, "lineup").stream():
                 if d.to_dict().get("name") == nickname:
                     if channel:
                         await play_song(
-                            member.guild, team,
-                            nickname, int(d.id),
-                            channel
+                            guild=member.guild,
+                            team=team,
+                            name=nickname,
+                            order=int(d.id),
+                            channel=channel,
+                            voice_channel=after.channel
                         )
                     return
 
@@ -472,7 +494,10 @@ async def on_voice_state_update(member, before, after):
 # =======================
 @bot.command(name="입장")
 async def join(ctx):
-    await connect_voice_by_guild(ctx.guild, ctx.channel)
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ 먼저 음성 채널에 들어가세요.")
+        return
+    await connect_voice_to_channel(ctx.guild, ctx.author.voice.channel, ctx.channel)
 
 @bot.command(name="퇴장")
 async def leave(ctx):
@@ -724,4 +749,5 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN 환경변수가 비어있습니다.")
 
 bot.run(TOKEN)
+
 
