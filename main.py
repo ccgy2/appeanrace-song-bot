@@ -6,6 +6,7 @@ import json
 import random
 import asyncio
 import base64
+import time
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -20,15 +21,18 @@ FIREBASE_KEY = os.getenv("FIREBASE_SERVICE_ACCOUNT")
 # 🔴 본인 디스코드 ID (환경변수 OWNER_ID로 설정 가능)
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# ✅ (추가) 쿠키 환경변수 방식
+# ✅ 쿠키 환경변수 방식
 YTDLP_COOKIES_B64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
-YTDLP_COOKIES_PATH = os.getenv("YTDLP_COOKIES_PATH", "").strip()  # 파일 경로로 쓰고 싶으면 이걸로도 가능
+YTDLP_COOKIES_PATH = os.getenv("YTDLP_COOKIES_PATH", "").strip()
 
 # =======================
 # 자동 퇴장 설정값
 # =======================
 VOICE_IDLE_SECONDS = 300
 WARNING_SECONDS = 30
+
+# ✅ 입장곡 중복 실행 방지 (초)
+JOIN_PLAY_COOLDOWN_SECONDS = 5
 
 # =======================
 # Firebase
@@ -58,6 +62,10 @@ current_team = {}
 lineup_message = {}
 idle_countdown_tasks = {}
 now_playing_message = {}
+
+# ✅ 추가 상태
+voice_connect_locks = {}
+last_join_play = {}
 
 ENTRANCE_ROLE_NAME = "등장곡 재생인"
 
@@ -93,34 +101,65 @@ async def get_or_create_role(guild):
     return role
 
 def get_default_text_channel(guild: discord.Guild):
-    if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
+    me = guild.me
+    if guild.system_channel and me and guild.system_channel.permissions_for(me).send_messages:
         return guild.system_channel
     for ch in guild.text_channels:
-        perms = ch.permissions_for(guild.me)
-        if perms.send_messages:
-            return ch
+        if me:
+            perms = ch.permissions_for(me)
+            if perms.send_messages:
+                return ch
     return None
 
+def get_guild_lock(guild_id: int):
+    if guild_id not in voice_connect_locks:
+        voice_connect_locks[guild_id] = asyncio.Lock()
+    return voice_connect_locks[guild_id]
+
+def get_member_voice_channel(member: discord.Member):
+    if member and member.voice and member.voice.channel:
+        return member.voice.channel
+    return None
+
+# =======================
+# 음성 연결
+# =======================
 async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
     if voice_channel is None:
         if text_channel:
             await text_channel.send("❌ 연결할 음성 채널이 없습니다.")
         return None
 
-    vc = guild.voice_client
+    lock = get_guild_lock(guild.id)
 
-    if vc:
-        if vc.channel.id == voice_channel.id:
+    async with lock:
+        vc = guild.voice_client
+
+        # 이미 같은 채널에 있으면 그대로 사용
+        if vc and vc.channel and vc.channel.id == voice_channel.id:
+            print(f"[voice] 이미 연결됨: guild={guild.id}, channel={voice_channel.name}")
             return vc
-        await vc.move_to(voice_channel)
-        if text_channel:
-            await text_channel.send(f"🔊 음성 채널 이동: {voice_channel.name}")
-        return vc
 
-    vc = await voice_channel.connect()
-    if text_channel:
-        await text_channel.send(f"🔊 음성 채널 연결: {voice_channel.name}")
-    return vc
+        # 다른 채널에 있으면 이동
+        if vc and vc.channel and vc.channel.id != voice_channel.id:
+            print(f"[voice] 이동: guild={guild.id}, {vc.channel.name} -> {voice_channel.name}")
+            await vc.move_to(voice_channel)
+            if text_channel:
+                await text_channel.send(f"🔊 음성 채널 이동: {voice_channel.name}")
+            return vc
+
+        # 끊긴 voice_client 객체 정리
+        if vc and not vc.is_connected():
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                pass
+
+        print(f"[voice] 연결: guild={guild.id}, channel={voice_channel.name}")
+        vc = await voice_channel.connect()
+        if text_channel:
+            await text_channel.send(f"🔊 음성 채널 연결: {voice_channel.name}")
+        return vc
 
 # =======================
 # 볼륨
@@ -176,13 +215,9 @@ async def update_now_playing_embed(channel, guild_id, title, song, countdown=Non
             now_playing_message[guild_id] = await channel.send(embed=embed)
 
 # =======================
-# ✅ 쿠키 준비 (B64 -> /tmp 파일)
+# 쿠키 준비
 # =======================
 def prepare_ytdlp_cookies_file():
-    """
-    1) YTDLP_COOKIES_PATH가 있으면 그걸 사용
-    2) 없고 YTDLP_COOKIES_B64가 있으면 /tmp/ytdlp_cookies.txt 생성해서 사용
-    """
     if YTDLP_COOKIES_PATH:
         if os.path.exists(YTDLP_COOKIES_PATH):
             return YTDLP_COOKIES_PATH
@@ -243,7 +278,10 @@ def _pick_audio_url(info: dict):
     if not fmts:
         return None
 
-    audio_only = [f for f in fmts if f.get("vcodec") == "none" and f.get("acodec") != "none" and f.get("url")]
+    audio_only = [
+        f for f in fmts
+        if f.get("vcodec") == "none" and f.get("acodec") != "none" and f.get("url")
+    ]
     if audio_only:
         audio_only.sort(key=lambda x: (x.get("abr") or 0), reverse=True)
         return audio_only[0].get("url")
@@ -313,34 +351,50 @@ async def play_song(guild, team, name, order, channel, voice_channel):
         return
     d = doc.to_dict()
     await play_youtube(
-        guild, team,
-        d["url"], d["start"], d["end"] - d["start"],
-        order, channel, voice_channel
+        guild=guild,
+        team=team,
+        url=d["url"],
+        start=d["start"],
+        duration=d["end"] - d["start"],
+        order=order,
+        channel=channel,
+        voice_channel=voice_channel
     )
 
 # =======================
 # 파일 사운드
 # =======================
-async def play_local_sound(guild, team, folder, channel):
+async def play_local_sound(guild, team, folder, channel, voice_channel=None):
     base = os.path.join("sounds", folder)
     if not os.path.exists(base):
+        await channel.send(f"❌ 사운드 폴더 없음: {folder}")
         return
+
     files = [f for f in os.listdir(base) if f.lower().endswith((".mp3", ".wav", ".ogg"))]
     if not files:
+        await channel.send(f"❌ 재생 가능한 사운드 파일 없음: {folder}")
         return
+
     filename = random.choice(files)
     path = os.path.join(base, filename)
 
-    vc = await connect_voice_by_guild(guild, channel)
+    vc = await connect_voice_to_channel(guild, voice_channel, channel)
     if vc is None:
         return
+
     if vc.is_playing():
         vc.stop()
 
-    vc.play(discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(path),
-        volume=get_volume(team)
-    ))
+    try:
+        vc.play(
+            discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(path),
+                volume=get_volume(team)
+            )
+        )
+    except Exception as e:
+        await channel.send(f"❌ 로컬 사운드 재생 실패: {e}")
+        return
 
     await update_now_playing_embed(
         channel, guild.id, "🎶 재생 중", f"{folder}/{filename}"
@@ -350,27 +404,37 @@ async def play_local_sound(guild, team, folder, channel):
 # 자동 퇴장
 # =======================
 async def start_idle_countdown(guild, channel):
+    print(f"[idle] 카운트다운 시작: guild={guild.id}")
+
     for remaining in range(VOICE_IDLE_SECONDS, 0, -1):
         vc = guild.voice_client
-        if not vc or [m for m in vc.channel.members if not m.bot]:
+        if not vc or not vc.channel:
+            print(f"[idle] voice client 없음, 종료: guild={guild.id}")
             return
+
+        humans = [m for m in vc.channel.members if not m.bot]
+        if humans:
+            print(f"[idle] 사람 다시 들어옴, 종료: guild={guild.id}")
+            return
+
         await update_now_playing_embed(
             channel, guild.id, "⏸ 대기 중",
             "음성 채널에 사람이 없습니다",
             countdown=remaining
         )
         await asyncio.sleep(1)
+
     if guild.voice_client:
-        await guild.voice_client.disconnect()
+        try:
+            await guild.voice_client.disconnect()
+            print(f"[idle] 자동 퇴장 완료: guild={guild.id}")
+        except Exception as e:
+            print(f"[idle] 자동 퇴장 실패: {e}")
 
 # =======================
-# ✅ 이름 변경 (데이터 손실 없이 문서ID/필드만 변경)
+# 이름 변경
 # =======================
 def rename_player_in_team(team: str, old_name: str, new_name: str):
-    """
-    - entranceSongs/{old_name} -> entranceSongs/{new_name}로 복사 후 old 삭제 (데이터 유지)
-    - lineup/{1~9} 문서들의 name 값에서 old_name -> new_name 변경
-    """
     old_name = (old_name or "").strip()
     new_name = (new_name or "").strip()
 
@@ -379,7 +443,6 @@ def rename_player_in_team(team: str, old_name: str, new_name: str):
     if old_name == new_name:
         return False, "기존 이름과 새 이름이 같습니다."
 
-    # 1) entranceSongs 문서 rename
     songs_col = team_ref(team, "entranceSongs")
     old_doc_ref = songs_col.document(old_name)
     new_doc_ref = songs_col.document(new_name)
@@ -387,11 +450,9 @@ def rename_player_in_team(team: str, old_name: str, new_name: str):
     old_doc = old_doc_ref.get()
     new_doc = new_doc_ref.get()
 
-    # 새 문서가 이미 있으면 덮어쓰기 위험 -> 막음
     if new_doc.exists:
         return False, f"새 이름({new_name})의 등장곡 문서가 이미 존재합니다. (중복)"
 
-    # old가 없을 수도 있음(등장곡 저장 안 했거나 다른 케이스). 그럼 lineup만 처리
     batch = db.batch()
 
     if old_doc.exists:
@@ -399,7 +460,6 @@ def rename_player_in_team(team: str, old_name: str, new_name: str):
         batch.set(new_doc_ref, data)
         batch.delete(old_doc_ref)
 
-    # 2) lineup name 치환
     lineup_col = team_ref(team, "lineup")
     changed_lineup = 0
     for i in range(1, 10):
@@ -428,6 +488,7 @@ def rename_player_in_team(team: str, old_name: str, new_name: str):
 @bot.event
 async def on_ready():
     print("🔥 Railway 등장곡 봇 실행 완료")
+    print(f"🤖 로그인: {bot.user} / ID={bot.user.id if bot.user else 'unknown'}")
     if COOKIES_FILE:
         print("[cookies] yt-dlp 쿠키 적용됨 ✅")
     else:
@@ -443,10 +504,14 @@ async def on_voice_state_update(member, before, after):
     vc = guild.voice_client
     channel = get_default_text_channel(guild)
 
+    before_name = before.channel.name if before.channel else None
+    after_name = after.channel.name if after.channel else None
+    print(f"[voice_state] guild={guild.id} member={member.display_name} before={before_name} after={after_name}")
+
     # =======================
     # 1) 사람이 봇이 있는 채널에서 나갔을 때: 자동 퇴장 카운트다운 시작
     # =======================
-    if vc and before.channel and vc.channel and before.channel.id == vc.channel.id:
+    if vc and vc.channel and before.channel and before.channel.id == vc.channel.id:
         humans = [m for m in vc.channel.members if not m.bot]
         if len(humans) == 0:
             old_task = idle_countdown_tasks.get(guild.id)
@@ -459,18 +524,29 @@ async def on_voice_state_update(member, before, after):
     # =======================
     # 2) 사람이 봇이 있는 채널로 들어왔을 때: 카운트다운 취소
     # =======================
-    if vc and after.channel and vc.channel and after.channel.id == vc.channel.id:
+    if vc and vc.channel and after.channel and after.channel.id == vc.channel.id:
         task = idle_countdown_tasks.pop(guild.id, None)
         if task:
             task.cancel()
+            print(f"[idle] 카운트다운 취소: guild={guild.id}")
 
     # =======================
-    # 3) "새로 음성 채널 입장"했을 때만 등장곡 재생
-    #    (방 이동은 제외하고 싶으면 before.channel is None 조건 유지)
+    # 3) 새로 음성 채널 입장했을 때만 등장곡 재생
     # =======================
     if before.channel is None and after.channel is not None:
         if not has_entrance_role(member):
             return
+
+        # ✅ 중복 실행 방지
+        now = time.time()
+        key = (guild.id, member.id)
+        last_ts = last_join_play.get(key, 0)
+
+        if now - last_ts < JOIN_PLAY_COOLDOWN_SECONDS:
+            print(f"[join_song] 중복 방지 스킵: guild={guild.id}, member={member.display_name}")
+            return
+
+        last_join_play[key] = now
 
         nickname = member.display_name
 
@@ -479,6 +555,7 @@ async def on_voice_state_update(member, before, after):
             for d in team_ref(team, "lineup").stream():
                 if d.to_dict().get("name") == nickname:
                     if channel:
+                        print(f"[join_song] 재생: guild={guild.id}, team={team}, name={nickname}, channel={after.channel.name}")
                         await play_song(
                             guild=member.guild,
                             team=team,
@@ -502,8 +579,11 @@ async def join(ctx):
 @bot.command(name="퇴장")
 async def leave(ctx):
     if ctx.guild.voice_client:
-        await ctx.guild.voice_client.disconnect()
-        await ctx.send("🔇 음성 채널 퇴장")
+        try:
+            await ctx.guild.voice_client.disconnect()
+            await ctx.send("🔇 음성 채널 퇴장")
+        except Exception as e:
+            await ctx.send(f"❌ 퇴장 실패: {e}")
 
 @bot.command(name="팀")
 async def set_team(ctx, team: str):
@@ -521,11 +601,13 @@ async def volume(ctx, value: int):
 def parse_song(args):
     name, url, tr = [x.strip() for x in args.split(" / ", 2)]
     a, b = tr.replace("-", "~").split("~")
+
     def sec(t):
         if ":" in t:
             m, s = t.split(":")
             return int(m) * 60 + int(s)
         return int(t)
+
     return name, url.split("&")[0], sec(a), sec(b)
 
 @bot.command(name="저장")
@@ -552,13 +634,28 @@ async def change(ctx, *, args):
 async def preview(ctx, name: str):
     if not can_manage(ctx):
         return
+
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        await ctx.send("❌ 먼저 음성 채널에 들어가세요.")
+        return
+
     team = get_team(ctx.guild.id)
     doc = team_ref(team, "entranceSongs").document(name).get()
     if not doc.exists:
         await ctx.send("❌ 등장곡 없음")
         return
+
     d = doc.to_dict()
-    await play_youtube(ctx.guild, team, d["url"], d["start"], 5, None, ctx.channel)
+    await play_youtube(
+        guild=ctx.guild,
+        team=team,
+        url=d["url"],
+        start=d["start"],
+        duration=5,
+        order=None,
+        channel=ctx.channel,
+        voice_channel=ctx.author.voice.channel
+    )
 
 @bot.command(name="타순")
 async def set_order(ctx, num: int, *, args):
@@ -603,12 +700,6 @@ async def remove_role(ctx, member: discord.Member):
     await member.remove_roles(role)
     await ctx.send(f"❌ 역할 회수: {member.display_name}")
 
-# =======================
-# ✅ 새 명령어: 이름변경
-# 사용법:
-# 1) !이름변경 새닉네임            -> 본인 이름(현재 display_name 기준) 변경
-# 2) !이름변경 기존닉네임 / 새닉네임 -> (관리자/권한자) 특정 이름 변경
-# =======================
 @bot.command(name="이름변경")
 async def rename_name(ctx, *, args: str):
     team = get_team(ctx.guild.id)
@@ -618,7 +709,6 @@ async def rename_name(ctx, *, args: str):
         await ctx.send("❌ 사용법: `!이름변경 새닉네임` 또는 `!이름변경 기존닉 / 새닉`")
         return
 
-    # 2개 인자(기존/새) 형태면 관리자만 허용
     if " / " in args:
         if not can_manage(ctx):
             await ctx.send("❌ 권한이 없습니다. (관리자/등장곡 재생인/OWNER_ID만 가능)")
@@ -629,7 +719,6 @@ async def rename_name(ctx, *, args: str):
             await ctx.send("❌ 사용법: `!이름변경 기존닉 / 새닉`")
             return
     else:
-        # 1개 인자면 본인 이름 변경 (권한 없어도 가능)
         old_name = ctx.author.display_name
         new_name = args.strip()
 
@@ -648,10 +737,20 @@ class Control(discord.ui.Button):
         super().__init__(label=label, style=discord.ButtonStyle.primary)
         self.action = action
 
-    async def callback(self, interaction):
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         team = get_team(interaction.guild.id)
         ch = interaction.channel
+        vc = interaction.guild.voice_client
+
+        # 우선순위:
+        # 1) 버튼 누른 사람이 들어가 있는 채널
+        # 2) 이미 봇이 연결된 채널
+        voice_channel = None
+        if interaction.user.voice and interaction.user.voice.channel:
+            voice_channel = interaction.user.voice.channel
+        elif vc and vc.channel:
+            voice_channel = vc.channel
 
         if self.action == "stop":
             if interaction.guild.voice_client and interaction.guild.voice_client.is_playing():
@@ -662,17 +761,41 @@ class Control(discord.ui.Button):
                 )
             return
 
+        if self.action == "next":
+            team_state = game_state(team)
+            current_order = team_state.get().to_dict().get("currentOrder", 1)
+            next_order = current_order + 1
+            if next_order > 9:
+                next_order = 1
+
+            doc = team_ref(team, "lineup").document(str(next_order)).get()
+            if doc.exists and voice_channel:
+                await play_song(
+                    interaction.guild,
+                    team,
+                    doc.to_dict().get("name", ""),
+                    next_order,
+                    ch,
+                    voice_channel
+                )
+                await refresh_lineup(interaction)
+            return
+
         if self.action.startswith("num"):
             order = int(self.action.replace("num", ""))
             doc = team_ref(team, "lineup").document(str(order)).get()
             if doc.exists:
                 await play_song(
-                    interaction.guild, team,
-                    doc.to_dict().get("name", ""), order, ch
+                    interaction.guild,
+                    team,
+                    doc.to_dict().get("name", ""),
+                    order,
+                    ch,
+                    voice_channel
                 )
                 await refresh_lineup(interaction)
         else:
-            await play_local_sound(interaction.guild, team, self.action, ch)
+            await play_local_sound(interaction.guild, team, self.action, ch, voice_channel)
 
 class LineupView(discord.ui.View):
     def __init__(self):
@@ -749,5 +872,3 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN 환경변수가 비어있습니다.")
 
 bot.run(TOKEN)
-
-
