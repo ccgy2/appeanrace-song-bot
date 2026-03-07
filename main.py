@@ -101,18 +101,26 @@ def get_default_text_channel(guild: discord.Guild):
             return ch
     return None
 
-async def connect_voice_by_guild(guild, channel=None):
-    if guild.voice_client:
-        return guild.voice_client
-    for m in guild.members:
-        if m.voice:
-            vc = await m.voice.channel.connect()
-            if channel:
-                await channel.send(f"🔊 음성 채널 연결: {m.voice.channel.name}")
+async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
+    if voice_channel is None:
+        if text_channel:
+            await text_channel.send("❌ 연결할 음성 채널이 없습니다.")
+        return None
+
+    vc = guild.voice_client
+
+    if vc:
+        if vc.channel.id == voice_channel.id:
             return vc
-    if channel:
-        await channel.send("❌ 음성 채널에 아무도 없음")
-    return None
+        await vc.move_to(voice_channel)
+        if text_channel:
+            await text_channel.send(f"🔊 음성 채널 이동: {voice_channel.name}")
+        return vc
+
+    vc = await voice_channel.connect()
+    if text_channel:
+        await text_channel.send(f"🔊 음성 채널 연결: {voice_channel.name}")
+    return vc
 
 # =======================
 # 볼륨
@@ -716,3 +724,4 @@ if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN 환경변수가 비어있습니다.")
 
 bot.run(TOKEN)
+
