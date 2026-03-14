@@ -132,24 +132,23 @@ async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
         # 이미 연결되어 있으면 이동
         if vc and vc.is_connected():
             if vc.channel.id != voice_channel.id:
-                print(f"[voice] 채널 이동: {vc.channel.name} -> {voice_channel.name}")
                 await vc.move_to(voice_channel)
             return vc
 
-        # 연결 중이거나 꼬여있으면 강제 종료
+        # 기존 연결 정리
         if vc:
-            print("[voice] 기존 음성 연결 정리")
             await vc.disconnect(force=True)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
 
-        print(f"[voice] 새 음성 연결 시도: {voice_channel.name}")
+        print(f"[voice] 연결 시도: {voice_channel.name}")
 
         vc = await voice_channel.connect(
-            timeout=15,
-            reconnect=False
+            timeout=20,
+            reconnect=True,
+            self_deaf=True
         )
 
-        print("[voice] 음성 연결 성공")
+        print("[voice] 연결 성공")
 
         return vc
 
@@ -160,6 +159,7 @@ async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
             await text_channel.send(f"❌ 음성 연결 실패: {e}")
 
         return None
+
 # =======================
 # 볼륨
 # =======================
