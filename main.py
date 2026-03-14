@@ -125,22 +125,19 @@ def get_member_voice_channel(member: discord.Member):
 # =======================
 # 음성 연결
 # =======================
+import asyncio
+
 async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
     try:
         vc = guild.voice_client
 
-        # 이미 연결되어 있으면 이동
-        if vc and vc.is_connected():
-            if vc.channel.id != voice_channel.id:
-                await vc.move_to(voice_channel)
-            return vc
-
-        # 기존 연결 정리
         if vc:
-            await vc.disconnect(force=True)
-            await asyncio.sleep(2)
+            try:
+                await vc.disconnect(force=True)
+            except:
+                pass
 
-        print(f"[voice] 연결 시도: {voice_channel.name}")
+        await asyncio.sleep(2)
 
         vc = await voice_channel.connect(
             timeout=30,
