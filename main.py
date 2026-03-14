@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+
 # =======================
 # ENV
 # =======================
@@ -125,42 +126,40 @@ def get_member_voice_channel(member: discord.Member):
 # 음성 연결
 # =======================
 async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
-    if voice_channel is None:
-        if text_channel:
-            await text_channel.send("❌ 연결할 음성 채널이 없습니다.")
-        return None
-
-    lock = get_guild_lock(guild.id)
-
-    async with lock:
+    try:
         vc = guild.voice_client
 
-        # 이미 같은 채널에 있으면 그대로 사용
-        if vc and vc.channel and vc.channel.id == voice_channel.id:
-            print(f"[voice] 이미 연결됨: guild={guild.id}, channel={voice_channel.name}")
+        # 이미 연결되어 있으면 이동
+        if vc and vc.is_connected():
+            if vc.channel.id != voice_channel.id:
+                print(f"[voice] 채널 이동: {vc.channel.name} -> {voice_channel.name}")
+                await vc.move_to(voice_channel)
             return vc
 
-        # 다른 채널에 있으면 이동
-        if vc and vc.channel and vc.channel.id != voice_channel.id:
-            print(f"[voice] 이동: guild={guild.id}, {vc.channel.name} -> {voice_channel.name}")
-            await vc.move_to(voice_channel)
-            if text_channel:
-                await text_channel.send(f"🔊 음성 채널 이동: {voice_channel.name}")
-            return vc
+        # 연결 중이거나 꼬여있으면 강제 종료
+        if vc:
+            print("[voice] 기존 음성 연결 정리")
+            await vc.disconnect(force=True)
+            await asyncio.sleep(1)
 
-        # 끊긴 voice_client 객체 정리
-        if vc and not vc.is_connected():
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                pass
+        print(f"[voice] 새 음성 연결 시도: {voice_channel.name}")
 
-        print(f"[voice] 연결: guild={guild.id}, channel={voice_channel.name}")
-        vc = await voice_channel.connect()
-        if text_channel:
-            await text_channel.send(f"🔊 음성 채널 연결: {voice_channel.name}")
+        vc = await voice_channel.connect(
+            timeout=15,
+            reconnect=False
+        )
+
+        print("[voice] 음성 연결 성공")
+
         return vc
 
+    except Exception as e:
+        print(f"[voice] 연결 실패: {e}")
+
+        if text_channel:
+            await text_channel.send(f"❌ 음성 연결 실패: {e}")
+
+        return None
 # =======================
 # 볼륨
 # =======================
