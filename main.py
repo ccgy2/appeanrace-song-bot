@@ -143,7 +143,7 @@ async def connect_voice_to_channel(guild, voice_channel, text_channel=None):
         print(f"[voice] 연결 시도: {voice_channel.name}")
 
         vc = await voice_channel.connect(
-            timeout=20,
+            timeout=30,
             reconnect=True,
             self_deaf=True
         )
