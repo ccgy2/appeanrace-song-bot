@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "deno"]
+nixPkgs = ["ffmpeg"]
 
 [start]
 cmd = "python bot.py"
