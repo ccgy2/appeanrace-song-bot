@@ -107,7 +107,9 @@ class WebPanel:
             web.put('/api/lineup', self.save_lineup),
             web.post('/api/upload', self.upload),
             web.get('/api/media/{asset}', self.media),
+            web.post('/api/events', self.create_event),
             web.put('/api/events', self.event),
+            web.delete('/api/events', self.delete_event),
             web.post('/api/control', self.control),
             web.get('/api/diagnostics', self.diagnostics),
             web.get('/api/export', self.export),
@@ -351,9 +353,56 @@ class WebPanel:
             'lineup': await self.store.lineup(team), 'state': state, 'channels': channels,
             'voice': self.bot.player.voice.status(guild) if guild else None,
             'nowPlaying': self.bot.player.now.get(guild.id) if guild else None,
-            'events': [{'key': k, 'label': v, 'custom': events.get(k), 'bundledCount': len(self.assets.bundled(k))} for k, v in EVENTS.items()],
+            'events': self._event_rows(events),
             'maxUploadMb': self.s.max_upload_mb,
         })
+
+    def _event_rows(self, events: dict[str, dict]) -> list[dict]:
+        rows = []
+        for key, label in EVENTS.items():
+            doc = events.get(key)
+            source = None
+            if doc:
+                source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
+            rows.append({'key': key, 'label': label, 'custom': source,
+                         'customEvent': False, 'bundledCount': len(self.assets.bundled(key))})
+        extras = []
+        for key, doc in events.items():
+            if key in EVENTS or not doc.get('isCustom'):
+                continue
+            label = str(doc.get('label') or key)
+            source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
+            extras.append({'key': key, 'label': label, 'custom': source,
+                           'customEvent': True, 'bundledCount': 0})
+        extras.sort(key=lambda row: row['label'].casefold())
+        return rows + extras
+
+    async def create_event(self, request):
+        data = await body(request)
+        team = clean_name(data.get('team'), '팀 이름')
+        label = clean_name(data.get('label'), '상황 이름')
+        existing = await self.store.events(team)
+        labels = {str(x.get('label') or EVENTS.get(x.get('id'), '')).casefold() for x in existing}
+        labels.update(v.casefold() for v in EVENTS.values())
+        if label.casefold() in labels:
+            raise ValueError('같은 이름의 경기 상황이 이미 있습니다.')
+        for _ in range(10):
+            key = 'custom_' + secrets.token_hex(6)
+            if not await self.store.event(team, key):
+                break
+        else:
+            raise RuntimeError('경기 상황 ID를 만들지 못했습니다.')
+        await self.store.set_event(team, key, {'label': label, 'isCustom': True})
+        return response({'ok': True, 'key': key, 'label': label}, 201)
+
+    async def delete_event(self, request):
+        team = clean_name(request.query.get('team'), '팀 이름')
+        key = str(request.query.get('key', ''))
+        current = await self.store.event(team, key)
+        if not current or not current.get('isCustom') or key in EVENTS:
+            raise ValueError('직접 추가한 경기 상황만 삭제할 수 있습니다.')
+        await self.store.set_event(team, key, None)
+        return response({'ok': True})
 
     async def team(self, request):
         data = await body(request)
@@ -431,17 +480,42 @@ class WebPanel:
     async def event(self, request):
         data = await body(request)
         team, key = clean_name(data.get('team')), str(data.get('key', ''))
-        if key not in EVENTS:
-            raise ValueError('알 수 없는 효과음입니다.')
+        current = await self.store.event(team, key)
+        custom_event = bool(current and current.get('isCustom') and key not in EVENTS)
+        if key not in EVENTS and not custom_event:
+            raise ValueError('알 수 없는 경기 상황입니다.')
+
+        base = {}
+        if custom_event:
+            base = {'label': clean_name(current.get('label') or key, '상황 이름'), 'isCustom': True}
+            if 'label' in data:
+                label = clean_name(data.get('label'), '상황 이름')
+                existing = await self.store.events(team)
+                for row in existing:
+                    if row.get('id') != key:
+                        row_label = str(row.get('label') or EVENTS.get(row.get('id'), ''))
+                        if row_label.casefold() == label.casefold():
+                            raise ValueError('같은 이름의 경기 상황이 이미 있습니다.')
+                if any(k != key and v.casefold() == label.casefold() for k, v in EVENTS.items()):
+                    raise ValueError('같은 이름의 기본 경기 상황이 이미 있습니다.')
+                base['label'] = label
+
         asset = data.get('assetId')
+        previous_source = ({k: v for k, v in current.items() if k not in {'id', 'label', 'isCustom'}} if custom_event else {})
         if data.get('songName'):
             name = clean_name(data['songName'])
             if not await self.store.song(team, name, 'situation'):
                 raise ValueError('상황별 노래 라이브러리에 먼저 곡을 등록하세요.')
-            await self.store.set_event(team, key, {'songName': name, 'category': 'situation'})
+            await self.store.set_event(team, key, {**base, 'songName': name, 'category': 'situation'})
         elif asset:
             meta = self.assets.get(str(asset))
-            await self.store.set_event(team, key, {'assetId': meta['id'], 'filename': meta['name']})
+            await self.store.set_event(team, key, {**base, 'assetId': meta['id'], 'filename': meta['name']})
+        elif custom_event and 'label' in data and 'assetId' not in data and 'songName' not in data:
+            # 이름만 바꿀 때는 기존 사운드 연결을 그대로 유지한다.
+            await self.store.set_event(team, key, {**base, **previous_source})
+        elif custom_event:
+            # 직접 만든 상황은 연결만 해제하고 상황 이름 자체는 남긴다.
+            await self.store.set_event(team, key, base)
         else:
             await self.store.set_event(team, key, None)
         return response({'ok': True})
@@ -481,8 +555,9 @@ class WebPanel:
             await player.play(guild, team, song, channel=channel, order=order)
         elif action == 'event':
             key = str(d.get('key', ''))
-            if key not in EVENTS:
-                raise ValueError('알 수 없는 효과음입니다.')
+            current = await self.store.event(team, key)
+            if key not in EVENTS and not (current and current.get('isCustom')):
+                raise ValueError('알 수 없는 경기 상황입니다.')
             await player.event(guild, team, key, channel)
         else:
             raise ValueError('알 수 없는 명령입니다.')
