@@ -1,25 +1,26 @@
 'use strict';
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
-let csrf = '', state = null, selectedTeam = '', selectedGuild = '';
+let csrf = '', state = null, selectedTeam = '', selectedGuild = '', selectedBot = 'primary';
 let source = 'youtube', assetId = '', uploading = false, toastTimer, previewAudio;
 let stateTicket = 0, uploadTicket = 0, previewTicket = 0;
 let accessToken = '', apiBase = '', configError = '', currentUser = null;
 let currentCategory = 'entrance', editingName = null;
 const categoryNames = {entrance:'등장곡', cheer:'응원가', situation:'상황별 노래'};
 function categorySongs(category = currentCategory) { return state?.library?.[category] || (category === 'entrance' ? state?.songs || [] : []); }
-function workspaceKey() { return 'appearance:workspace:v1:' + apiBase + ':' + (currentUser?.username || ''); }
+function workspaceKey() { return 'appearance:workspace:v2:' + apiBase + ':' + (currentUser?.username || ''); }
 function rememberWorkspace() {
   if (!currentUser) return;
   // Only non-secret UI choices; authentication tokens remain in sessionStorage.
-  try { localStorage.setItem(workspaceKey(), JSON.stringify({team:selectedTeam, guild:selectedGuild, category:currentCategory})); } catch {}
+  try { localStorage.setItem(workspaceKey(), JSON.stringify({team:selectedTeam, guild:selectedGuild, bot:selectedBot, category:currentCategory})); } catch {}
 }
 function restoreWorkspace() {
-  selectedTeam=''; selectedGuild=''; currentCategory='entrance';
+  selectedTeam=''; selectedGuild=''; selectedBot='primary'; currentCategory='entrance';
   try {
     const data=JSON.parse(localStorage.getItem(workspaceKey()) || '{}');
     if(typeof data.team==='string')selectedTeam=data.team;
     if(typeof data.guild==='string')selectedGuild=data.guild;
+    if(['primary','secondary'].includes(data.bot))selectedBot=data.bot;
     if(Object.hasOwn(categoryNames,data.category))currentCategory=data.category;
   } catch {}
   resetEditor(); updateCategory();
@@ -69,7 +70,7 @@ function normalizeApiBase(raw) {
   const u = new URL(String(raw || '').trim());
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
   if ((u.protocol !== 'https:' && !(local && u.protocol === 'http:')) || u.username || u.password || (u.pathname !== '/' && u.pathname !== '') || u.search || u.hash) throw new Error('Railway 주소는 경로 없는 HTTPS 주소여야 합니다.');
-  if (location.protocol === 'https:' && u.protocol !== 'https:') throw new Error('Firebase에서는 HTTPS Railway 주소만 사용할 수 있습니다.');
+  if (location.protocol === 'https:' && u.protocol !== 'https:') throw new Error('HTTPS 사이트에서는 HTTPS 서버 주소만 사용할 수 있습니다.');
   if (location.hostname === 'appearance-song.web.app' && !u.hostname.endsWith('.up.railway.app')) throw new Error('Railway의 Public Networking 주소(…up.railway.app)를 입력하세요.');
   return u.origin;
 }
@@ -89,7 +90,7 @@ function showLogin() {
   rememberToken(''); clearMedia();
   $('#app').hidden = true; $('#login-screen').hidden = false;
   $('#password').value = ''; if ($('#username')) $('#username').value = '';
-  selectedTeam=''; selectedGuild=''; currentCategory='entrance';
+  selectedTeam=''; selectedGuild=''; selectedBot='primary'; currentCategory='entrance';
   setTab('songs'); updateCategory();
   resetEditor();
 }
@@ -105,7 +106,7 @@ function configureClient() {
     const raw = configured;
     if (raw) apiBase = normalizeApiBase(raw);
     else if (/\.(web\.app|firebaseapp\.com)$/.test(location.hostname)) configError = '웹 연결 설정이 비어 있습니다. 최신 웹사이트 파일로 다시 배포하세요.';
-    else if (!['http:', 'https:'].includes(location.protocol)) configError = '파일을 직접 열지 말고 Firebase Hosting 또는 로컬 웹 서버로 접속하세요.';
+    else if (!['http:', 'https:'].includes(location.protocol)) configError = '파일을 직접 열지 말고 Railway 웹 주소 또는 로컬 웹 서버로 접속하세요.';
   } catch (err) {
     configError = err.message || 'Railway 공개 HTTPS 주소를 확인하세요.';
     apiBase = '';
@@ -124,7 +125,7 @@ async function request(path, method = 'GET', data, asBlob = false) {
   const controller = new AbortController(); options.signal = controller.signal;
   const timer = setTimeout(()=>controller.abort(), asBlob ? 180000 : (path==='/api/connection' ? 15000 : 60000));
   try { res = await fetch(url, options); } catch (err) {
-    throw new Error(err.name==='AbortError' ? '요청 시간이 초과됐습니다. 등록·재생은 처리됐을 수도 있으니 상태를 확인한 뒤 다시 시도하세요.' : 'Railway에 연결하지 못했습니다. 서버 실행 상태·공개 주소·WEB_ORIGINS에 현재 웹 주소가 등록됐는지 확인하세요.');
+    throw new Error(err.name==='AbortError' ? '요청 시간이 초과됐습니다. 등록·재생은 처리됐을 수도 있으니 상태를 확인한 뒤 다시 시도하세요.' : 'Railway에 연결하지 못했습니다. Railway 배포 상태와 공개 주소를 확인하세요.');
   } finally { clearTimeout(timer); }
   if (!res.ok) {
     let result; try { result = await res.json(); } catch { result = {}; }
@@ -140,10 +141,16 @@ async function checkConnection() {
   node.textContent = '연결 확인 중…'; node.className = ''; help.hidden = true;
   try {
     const r = await api('/api/connection');
-    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('library-categories')) throw new Error('Railway 봇 서버의 새 버전이 아닙니다. 이번 수정본 전체를 다시 배포하세요.');
-    node.textContent = r.discordReady ? '웹 연결 정상 · 봇 온라인' : '웹 연결 정상 · 봇 미연결';
+    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('dual-bot') || !r.capabilities?.includes('event-play-modes') || !r.capabilities?.includes('separate-voice-channels')) throw new Error('Railway 봇 서버가 최신 청백전 + 경기상황 버전이 아닙니다. 이번 봇 패치를 GitHub에 반영하고 Railway를 재배포하세요.');
+    const bots = Array.isArray(r.bots) ? r.bots : [];
+    const status = bots.map(b=>`${b.name || (b.id==='secondary'?'백팀 봇':'청팀 봇')} ${b.ready?'온라인':'오프라인'}`).join(' · ');
+    node.textContent = '웹 연결 정상' + (status ? ' · ' + status : '');
     node.className = 'success';
-    if (!r.discordReady) { help.textContent = r.webOnly ? '현재 WEB_ONLY=true입니다. Railway에서 false로 바꾸세요.' : '웹 API는 연결됐습니다. Discord 토큰·봇 실행 로그를 확인하세요.'; help.hidden = false; }
+    const secondary=bots.find(b=>b.id==='secondary');
+    if (!r.discordReady || (secondary && !secondary.ready)) {
+      help.textContent = r.webOnly ? '현재 WEB_ONLY=true입니다. Railway에서 false로 바꾸세요.' : (!secondary ? '보조 봇을 쓰려면 Railway에 DISCORD_TOKEN_SECONDARY를 설정하세요.' : '오프라인인 봇의 토큰·Discord 초대·Railway 실행 로그를 확인하세요.');
+      help.hidden = false;
+    }
     return true;
   } catch (err) {
     node.textContent = '연결 확인 필요'; node.className = 'error'; help.textContent = err.message; help.hidden = false;
@@ -201,7 +208,7 @@ function bindButton(label, cls, handler) {
   return b;
 }
 function context() {
-  return {guildId:selectedGuild, team:selectedTeam, channelId:$('#voice-select').value || null};
+  return {botTarget:selectedBot, guildId:selectedGuild, team:selectedTeam, channelId:$('#voice-select').value || null};
 }
 async function control(action, extra = {}, message = '') {
   if (!selectedGuild) throw new Error('Discord 서버를 먼저 선택하세요. 연결된 서버가 없으면 진단 탭을 확인하세요.');
@@ -295,7 +302,8 @@ async function selectSongFile(file) {
 function drawLive(s) {
   const voice = s.voice;
   $('#sidebar-dot').classList.toggle('online', s.ready);
-  $('#sidebar-status').textContent = s.ready ? 'Discord 연결됨' : 'Discord 미연결';
+  $('#sidebar-status').textContent = s.ready ? `${s.botLabel || '선택한 봇'} 연결됨` : `${s.botLabel || '선택한 봇'} 미연결`;
+  if ($('#voice-bot-label')) $('#voice-bot-label').textContent = s.botLabel || (selectedBot==='secondary'?'백팀 봇':'청팀 봇');
   $('#voice-title').textContent = voice?.connected ? `${voice.channelName} 연결됨` : '통화방 연결';
   $('#voice-detail').textContent = voice?.connected ? (voice.serverMuted ? '서버 음소거를 해제해주세요.' : `음성 연결 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
   $('#voice-error').hidden = !voice?.error; $('#voice-error').textContent = voice?.error || '';
@@ -306,27 +314,43 @@ function drawLive(s) {
   for (const id of ['connect','disconnect','next-player','stop','activate-team']) $('#' + id).disabled = off;
   $('#volume').disabled = off;
 }
+async function loadLive() {
+  // 실시간 음성/현재곡 상태만 조회한다. 이 API는 Firestore를 읽지 않는다.
+  if (!csrf || !state) return;
+  const params = new URLSearchParams();
+  params.set('bot_target', selectedBot);
+  if (selectedGuild) params.set('guild_id', selectedGuild);
+  const live = await api('/api/live?' + params);
+  if (!state || live.botTarget !== selectedBot) return;
+  state = {...state, ...live};
+  drawLive(state);
+}
+
 async function loadState(full = true) {
   if (!csrf) return;
   const ticket = ++stateTicket;
   const params = new URLSearchParams();
+  params.set('bot_target', selectedBot);
   if (selectedGuild) params.set('guild_id', selectedGuild);
   if (selectedTeam) params.set('team', selectedTeam);
   const s = await api('/api/state?' + params);
   if (ticket !== stateTicket) return;
-  state = s; selectedGuild = s.guildId || ''; selectedTeam = s.team;
+  state = s; selectedBot = s.botTarget || selectedBot; selectedGuild = s.guildId || ''; selectedTeam = s.team;
   drawLive(s); drawStorage(s); rememberWorkspace();
   if (!full) return;
+  const usableBots=(s.botTargets || []).filter(b=>b.id==='primary' || b.userId || b.ready);
+  fillSelect($('#bot-select'), usableBots.map(b=>({id:b.id,name:`${b.name}${b.ready?' · 온라인':' · 오프라인'}`})), selectedBot);
   fillSelect($('#guild-select'), s.guilds, selectedGuild, s.guilds.length ? null : '연결된 서버 없음');
   fillSelect($('#team-select'), s.teams.map(t=>({id:t,name:t})), selectedTeam);
   const chosenVoice = $('#voice-select').value;
-  fillSelect($('#voice-select'), s.channels.map(c=>({id:c.id,name:`${c.name} · ${c.members}명${c.available ? '' : ' (권한 부족)'}`})), chosenVoice || s.voice?.channelId || '', '통화방 선택');
+  fillSelect($('#voice-select'), s.channels.map(c=>({id:c.id,name:`${c.name} · ${c.members}명${c.occupiedByOtherBot ? ` (${c.occupiedByLabel || '다른 봇'} 사용 중 · 선택 불가)` : (c.available ? '' : ' (권한 부족)')}`})), chosenVoice || s.voice?.channelId || '', '통화방 선택');
   $('#storage-badge').textContent = s.storage === 'firebase' ? '곡 정보: Firebase' : '곡 정보: 로컬 DB';
   const notes = [];
   if (s.webOnly) notes.push('웹 확인 모드입니다. 실제 접속·재생은 WEB_ONLY=false로 바꾸고 봇을 실행하세요.');
   else if (!s.ready) notes.push('봇이 Discord에 연결되지 않았습니다. 토큰·실행 로그를 확인하세요. 곡 등록은 가능합니다.');
   if (s.storage === 'local') notes.push('로컬 저장 모드: 재배포 시 파일을 유지하려면 DATA_DIR에 영구 저장소가 필요합니다.');
-  if (s.activeTeam !== selectedTeam) notes.push(`현재 Discord 경기 팀은 “${s.activeTeam}”입니다. 팀을 바꾸려면 “이 팀으로 경기 진행”을 누르세요.`);
+  if (s.activeTeam !== selectedTeam) notes.push(`${s.botLabel || '선택한 봇'}의 현재 경기 팀은 “${s.activeTeam}”입니다. 팀을 바꾸려면 “이 봇의 경기 팀으로 설정”을 누르세요.`);
+  if (s.otherBotVoice) notes.push(`${s.otherBotVoice.botLabel || '다른 봇'}이 “${s.otherBotVoice.channelName}” 통화방을 사용 중입니다. 선택한 봇은 같은 통화방에 들어갈 수 없습니다.`);
   $('#workspace-note').hidden = !notes.length; $('#workspace-note').textContent = notes.join(' ');
   $('#upload-limit').textContent = `MP3 · WAV · M4A · OGG · 최대 ${s.maxUploadMb}MB`;
   updateCategory(); renderSongs(); renderLineup(); renderEvents(); applyRole();
@@ -399,6 +423,18 @@ function renderLineup() {
     grid.append(card);
   }
 }
+function eventTracks(event) {
+  const tracks=event.custom?.tracks;
+  if(Array.isArray(tracks)) return tracks;
+  if(event.custom?.songName) return [{type:'song',songName:event.custom.songName}];
+  if(event.custom?.assetId) return [{type:'asset',assetId:event.custom.assetId,filename:event.custom.filename || '업로드 오디오'}];
+  return [];
+}
+function eventModeName(mode){return {single:'단곡',random:'랜덤',sequence:'여러곡 순차'}[mode] || '단곡';}
+async function saveEventTracks(event, tracks, playMode) {
+  await api('/api/events','PUT',{team:selectedTeam,key:event.key,tracks,playMode});
+  await loadState();
+}
 function renderEvents() {
   const grid=$('#events-grid'); grid.replaceChildren();
   for (const event of state.events) {
@@ -411,53 +447,76 @@ function renderEvents() {
     if(currentUser?.role==='admin' && event.customEvent){
       const actions=el('div',null,'event-mini-actions');
       actions.append(bindButton('이름 수정','ghost',async()=>{
-        const next=prompt('새 상황 이름을 입력하세요.',event.label);
-        if(next===null)return;
+        const next=prompt('새 상황 이름을 입력하세요.',event.label); if(next===null)return;
         const label=next.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
-        await api('/api/events','PUT',{team:selectedTeam,key:event.key,label});
-        await loadState();toast('경기 상황 이름을 수정했습니다.');
+        await api('/api/events','PUT',{team:selectedTeam,key:event.key,label}); await loadState();toast('경기 상황 이름을 수정했습니다.');
       }));
       actions.append(bindButton('상황 삭제','ghost delete',async()=>{
-        if(!confirm(`“${event.label}” 상황을 삭제할까요? 연결된 사운드 설정도 함께 해제됩니다.`))return;
-        await api(`/api/events?team=${encodeURIComponent(selectedTeam)}&key=${encodeURIComponent(event.key)}`,'DELETE');
-        await loadState();toast('경기 상황을 삭제했습니다.');
+        if(!confirm(`“${event.label}” 상황을 삭제할까요? 연결된 사운드 목록도 함께 삭제됩니다.`))return;
+        await api(`/api/events?team=${encodeURIComponent(selectedTeam)}&key=${encodeURIComponent(event.key)}`,'DELETE'); await loadState();toast('경기 상황을 삭제했습니다.');
       }));
       titleRow.append(actions);
     }
     card.append(titleRow);
-    const sourceText=event.custom?.songName || event.custom?.filename || event.custom?.file || (event.customEvent ? '아직 연결된 사운드가 없습니다.' : `기본 효과음 ${event.bundledCount}개 · 무작위 재생`);
-    card.append(el('p',sourceText,'tiny'));
-    card.append(bindButton('▶ 재생','soft',()=>control('event',{key:event.key})));
-    if (currentUser?.role === 'admin' && event.custom) card.append(bindButton(event.customEvent?'사운드 연결 해제':'기본 복원','ghost',async()=>{
-      const message=event.customEvent?'연결된 사운드만 해제할까요? 경기 상황 이름은 유지됩니다.':'등록한 효과음 연결을 해제하고 기본 효과음으로 돌아갈까요?';
-      if (!confirm(message)) return;
-      await api('/api/events','PUT',{team:selectedTeam,key:event.key,assetId:null}); await loadState(); toast(event.customEvent?'사운드 연결을 해제했습니다.':'기본 효과음으로 복원했습니다.');
-    }));
+
+    const tracks=eventTracks(event), mode=event.custom?.playMode || 'single';
+    const summary=tracks.length ? `${eventModeName(mode)} · ${tracks.length}곡 연결됨` : (event.customEvent ? '아직 연결된 사운드가 없습니다.' : `기본 효과음 ${event.bundledCount}개 · 무작위 재생`);
+    card.append(el('p',summary,'tiny event-summary'));
+    card.append(bindButton('▶ 상황 재생','soft',()=>control('event',{key:event.key})));
+
     if (currentUser?.role !== 'admin') { grid.append(card); continue; }
-    const songLabel=el('label','상황별 노래에서 선택'), chooser=el('select');
-    chooser.setAttribute('aria-label',event.label+' 연결할 상황별 노래');
-    fillSelect(chooser,categorySongs('situation').map(s=>({id:s.name,name:s.name})),event.custom?.songName,'곡을 선택하세요');
-    songLabel.append(chooser);card.append(songLabel);
-    card.append(bindButton('선택한 노래 연결','ghost',async()=>{
-      if(!chooser.value)throw new Error('상황별 노래를 먼저 등록하고 선택하세요.');
-      await api('/api/events','PUT',{team:selectedTeam,key:event.key,songName:chooser.value});
-      await loadState();toast('경기 상황에 노래를 연결했습니다.');
+
+    const settings=el('div',null,'event-settings');
+    const modeLabel=el('label','재생 방식'), modeSelect=el('select');
+    [['single','단곡'],['random','랜덤'],['sequence','여러곡 순차']].forEach(([id,name])=>{const o=el('option',name);o.value=id;if(id===mode)o.selected=true;modeSelect.append(o);});
+    modeSelect.addEventListener('change',()=>run(modeSelect,async()=>{
+      await saveEventTracks(event,tracks,modeSelect.value); toast(`재생 방식을 ${eventModeName(modeSelect.value)}(으)로 변경했습니다.`);
     }));
-    const label=el('label','오디오 파일로 바로 연결'), input=el('input'); input.type='file'; input.disabled=state?.fileStorage?.uploadsAllowed===false; input.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';
+    modeLabel.append(modeSelect); settings.append(modeLabel);
+    const help={single:'첫 번째 곡 1개를 항상 재생합니다.',random:'연결한 곡 중 하나를 매번 무작위로 재생합니다.',sequence:'상황 버튼을 누를 때마다 다음 곡을 순서대로 재생합니다.'};
+    settings.append(el('p',help[mode] || help.single,'tiny event-mode-help'));
+
+    const list=el('div',null,'event-track-list');
+    if(!tracks.length){list.append(el('p','연결된 곡이 없습니다. 아래에서 상황별 노래나 파일을 추가하세요.','tiny'));}
+    tracks.forEach((track,index)=>{
+      const row=el('div',null,'event-track-row');
+      row.append(el('span',`${index+1}. ${track.type==='song' ? track.songName : (track.filename || '업로드 오디오')}`));
+      row.append(bindButton('빼기','ghost delete',()=>run(null,async()=>{
+        const next=tracks.filter((_,i)=>i!==index); await saveEventTracks(event,next,mode); toast('목록에서 제거했습니다.');
+      })));
+      list.append(row);
+    });
+    settings.append(list);
+
+    const songLabel=el('label','상황별 노래 추가'), chooser=el('select');
+    chooser.setAttribute('aria-label',event.label+'에 추가할 상황별 노래');
+    fillSelect(chooser,categorySongs('situation').map(s=>({id:s.name,name:s.name})),null,'곡을 선택하세요');
+    songLabel.append(chooser); settings.append(songLabel);
+    settings.append(bindButton('+ 선택한 노래 추가','ghost',async()=>{
+      if(!chooser.value)throw new Error('상황별 노래를 먼저 선택하세요.');
+      const next=[...tracks,{type:'song',songName:chooser.value}];
+      await saveEventTracks(event,next,mode); toast('경기 상황 곡 목록에 추가했습니다.');
+    }));
+
+    const fileLabel=el('label','오디오 파일 추가'), input=el('input'); input.type='file'; input.disabled=state?.fileStorage?.uploadsAllowed===false; input.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';
     input.addEventListener('change',()=>run(null,async()=>{
-      const file=input.files[0]; if(!file)return;
-      const team=selectedTeam;
-      input.disabled=true;
-      try { toast('경기 사운드를 업로드하고 있습니다.'); const result=await uploadFile(file); await api('/api/events','PUT',{team,key:event.key,assetId:result.id}); await loadState(); toast('경기 사운드를 연결했습니다.'); }
+      const file=input.files[0]; if(!file)return; input.disabled=true;
+      try { toast('경기 사운드를 업로드하고 있습니다.'); const result=await uploadFile(file); const next=[...tracks,{type:'asset',assetId:result.id,filename:result.name || file.name}]; await saveEventTracks(event,next,mode); toast('오디오를 경기 상황 목록에 추가했습니다.'); }
       finally {input.disabled=state?.fileStorage?.uploadsAllowed===false;}
     }));
-    label.append(input);card.append(label);grid.append(card);
+    fileLabel.append(input); settings.append(fileLabel);
+
+    if(tracks.length) settings.append(bindButton(event.customEvent?'목록 모두 비우기':'기본 효과음으로 복원','ghost delete',async()=>{
+      const msg=event.customEvent?'연결한 모든 곡을 목록에서 비울까요?':'등록한 곡 목록을 지우고 기본 효과음으로 돌아갈까요?';
+      if(!confirm(msg))return; await saveEventTracks(event,[],mode); toast(event.customEvent?'곡 목록을 비웠습니다.':'기본 효과음으로 복원했습니다.');
+    }));
+    card.append(settings); grid.append(card);
   }
 }
 async function diagnostics() {
   const d=await api('/api/diagnostics');
   const values=$('#diagnostic-values'); values.replaceChildren();
-  const rows=[['오디오 저장',d.fileStorage?.label || '확인 필요'],['파일 저장 경로',d.fileStorage?.uploadDir || ''],['Discord 연결',d.discordReady?'연결됨':'미연결'],['실행 모드',d.webOnly?'웹 확인 모드':'봇 + 웹'],['저장소',d.storage==='firebase'?'Firebase':'로컬 SQLite'],['FFmpeg',d.ffmpeg?'설치됨':'미설치'],['ffprobe',d.ffprobe?'설치됨':'미설치'],['Deno',d.deno?'설치됨':'미설치'],...Object.entries(d.packages),['YouTube 쿠키',d.cookiesConfigured?'설정됨':'미설정'],['웹 인증',d.authMode==='bearer'?'로그인 토큰 (교차 사이트 쿠키 불필요)':'같은 사이트 쿠키'],['Railway API',apiBase || location.origin],['Firebase 웹',d.webUrl || 'WEB_URL 미설정'],['허용된 웹 주소',(d.webOrigins || []).join(', ') || '같은 주소에서만 허용'],['업로드 제한',`${d.maxUploadMb}MB/파일 · 총 ${d.maxStorageMb}MB`]];
+  const rows=[['오디오 저장',d.fileStorage?.label || '확인 필요'],['파일 저장 경로',d.fileStorage?.uploadDir || ''],['Discord 연결',d.discordReady?'연결됨':'미연결'],['실행 모드',d.webOnly?'웹 확인 모드':'봇 + 웹'],['저장소',d.storage==='firebase'?'Firebase':'로컬 SQLite'],['FFmpeg',d.ffmpeg?'설치됨':'미설치'],['ffprobe',d.ffprobe?'설치됨':'미설치'],['Deno',d.deno?'설치됨':'미설치'],...Object.entries(d.packages),['YouTube 쿠키',d.cookiesConfigured?'설정됨':'미설정'],['웹 인증',d.authMode==='bearer'?'로그인 토큰 (교차 사이트 쿠키 불필요)':'같은 사이트 쿠키'],['Railway API',apiBase || location.origin],['관리 웹',d.webUrl || location.origin],['허용된 웹 주소',(d.webOrigins || []).join(', ') || '같은 주소에서만 허용'],['업로드 제한',`${d.maxUploadMb}MB/파일 · 총 ${d.maxStorageMb}MB`]];
   for (const [k,v] of rows) { const row=el('div',null,'diagnostic-row'), strong=el('strong',v); if(['미설치','미연결'].includes(v))strong.classList.add('warn');row.append(el('span',k),strong);values.append(row); }
   const checks=$('#diagnostic-checks'); checks.replaceChildren();
   for(const text of d.checks){const row=el('div',null,'check-item');row.append(el('span','✓'),el('p',text));checks.append(row);}
@@ -527,12 +586,13 @@ $('#song-form').addEventListener('submit',e=>{
   });
 });
 $$('[data-category]').forEach(button=>button.addEventListener('click',()=>setCategory(button.dataset.category)));
+$('#bot-select').addEventListener('change',()=>run(null,async()=>{selectedBot=$('#bot-select').value||'primary';selectedGuild='';selectedTeam='';resetEditor();await loadState();}));
 $('#guild-select').addEventListener('change',()=>run(null,async()=>{selectedGuild=$('#guild-select').value;selectedTeam='';resetEditor();await loadState();}));
 $('#team-select').addEventListener('change',()=>run(null,async()=>{selectedTeam=$('#team-select').value;resetEditor();await loadState();}));
 $('#new-team').addEventListener('click',()=>{$('#team-name').value='';$('#team-dialog').showModal();$('#team-name').focus();});
 $('#cancel-team').addEventListener('click',()=>$('#team-dialog').close());
 $('#team-form').addEventListener('submit',e=>{e.preventDefault();run(e.submitter,async()=>{const team=$('#team-name').value.trim();await api('/api/team','POST',{team});selectedTeam=team;resetEditor();$('#team-dialog').close();await loadState();toast('새 팀을 추가했습니다.');});});
-$('#activate-team').addEventListener('click',()=>run($('#activate-team'),async()=>{await api('/api/team','POST',{team:selectedTeam,guildId:selectedGuild,activate:true});await loadState();toast('현재 경기 팀을 변경했습니다.');}));
+$('#activate-team').addEventListener('click',()=>run($('#activate-team'),async()=>{await api('/api/team','POST',{team:selectedTeam,guildId:selectedGuild,botTarget:selectedBot,activate:true});await loadState();toast((state?.botLabel || (selectedBot==='secondary'?'백팀 봇':'청팀 봇'))+'의 경기 팀을 변경했습니다.');}));
 $('#connect').addEventListener('click',()=>run($('#connect'),()=>control('connect',{},'통화방에 연결했습니다.')));
 $('#disconnect').addEventListener('click',()=>run($('#disconnect'),()=>control('disconnect',{},'통화방에서 퇴장했습니다.')));
 $('#stop').addEventListener('click',()=>run($('#stop'),()=>control('stop',{},'재생을 정지했습니다.')));
@@ -544,7 +604,8 @@ $('#event-create-form').addEventListener('submit',e=>{e.preventDefault();run(e.s
   if(currentUser?.role!=='admin')throw new Error('관리자만 경기 상황을 추가할 수 있습니다.');
   if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
   const label=$('#event-name').value.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
-  await api('/api/events','POST',{team:selectedTeam,label});
+  const playMode=$('#event-create-mode').value;
+  await api('/api/events','POST',{team:selectedTeam,label,playMode});
   $('#event-name').value='';await loadState();toast('새 경기 상황을 추가했습니다.');
 });});
 $('#check-connection').addEventListener('click',()=>run($('#check-connection'),checkConnection));
@@ -553,7 +614,7 @@ $('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-back
 window.addEventListener('pagehide',clearMedia);
 $('#reload-users').addEventListener('click',()=>run($('#reload-users'),loadUsers));
 $('#reload-diagnostics').addEventListener('click',()=>run($('#reload-diagnostics'),diagnostics));
-setInterval(()=>{if(csrf && !document.hidden)loadState(false).catch(err=>{if(csrf)toast(err.message,true);});},15000);
+setInterval(()=>{if(csrf && state && !document.hidden)loadLive().catch(err=>{if(csrf)toast(err.message,true);});},10000);
 configureClient();
 (async()=>{
   const connected=await checkConnection();
