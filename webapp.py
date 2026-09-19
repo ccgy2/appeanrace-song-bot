@@ -227,15 +227,62 @@ class WebPanel:
             raise web.HTTPNotFound()
         return web.FileResponse(ROOT / 'static' / name)
 
+    def all_bots(self):
+        bots = [self.bot]
+        peer = getattr(self.bot, 'peer_bot', None)
+        if peer is not None:
+            bots.append(peer)
+        return bots
+
+    def bot_slot(self, bot) -> str:
+        return 'secondary' if getattr(bot, 'slot', 'primary') == 'secondary' else 'primary'
+
+    def bot_label(self, bot) -> str:
+        slot = self.bot_slot(bot)
+        default = (getattr(self.s, 'secondary_bot_label', '백팀 봇') if slot == 'secondary'
+                   else getattr(self.s, 'primary_bot_label', '청팀 봇'))
+        return str(getattr(bot, 'label', default) or default)
+
+    def bot_targets(self):
+        rows = []
+        for bot in self.all_bots():
+            user = getattr(bot, 'user', None)
+            rows.append({
+                'id': self.bot_slot(bot),
+                'name': self.bot_label(bot),
+                'ready': bool(bot.is_ready()),
+                'userId': str(user.id) if user else None,
+                'username': str(user) if user else None,
+            })
+        if getattr(self.bot.settings, 'secondary_token', '') and not any(x['id'] == 'secondary' for x in rows):
+            rows.append({'id': 'secondary', 'name': getattr(self.s, 'secondary_bot_label', '백팀 봇'),
+                         'ready': False, 'userId': None, 'username': None})
+        return rows
+
+    def target_bot(self, target: str | None):
+        target = 'secondary' if str(target or 'primary').lower() == 'secondary' else 'primary'
+        if target == 'primary':
+            return self.bot
+        peer = getattr(self.bot, 'peer_bot', None)
+        if peer is None:
+            raise ValueError('보조 봇이 실행되지 않았습니다. Railway에 DISCORD_TOKEN_SECONDARY를 설정하고 재배포하세요.')
+        return peer
+
     async def health(self, request):
-        return response({'web': 'ok', 'discord': 'ready' if self.bot.is_ready() else 'offline'})
+        bots = self.bot_targets()
+        return response({'web': 'ok', 'discord': 'ready' if self.bot.is_ready() else 'offline',
+                         'bots': bots})
 
     async def connection(self, request):
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
+        bots = self.bot_targets()
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
                          'authMode': 'bearer', 'web': 'ok', 'build': 'library-20260919-1',
-                         'capabilities': ['library-categories', 'atomic-rename', 'storage-check'],
-                         'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only})
+                         'capabilities': ['library-categories', 'atomic-rename', 'storage-check',
+                                          'dual-bot', 'per-bot-team'],
+                         'discordReady': self.bot.is_ready(), 'secondaryReady': any(
+                             x['id'] == 'secondary' and x['ready'] for x in bots),
+                         'bots': bots, 'webOnly': self.s.web_only})
 
     async def _ensure_admin(self):
         async with self.account_lock:
@@ -304,25 +351,26 @@ class WebPanel:
         resp.del_cookie(COOKIE, path='/')
         return resp
 
-    def guild(self, guild_id):
-        if not self.bot.is_ready():
-            raise ValueError('봇이 Discord에 연결되어 있지 않습니다. 진단 탭을 확인하세요.')
+    def guild(self, guild_id, target: str = 'primary'):
+        bot = self.target_bot(target)
+        if not bot.is_ready():
+            raise ValueError(f'{self.bot_label(bot)}이 Discord에 연결되어 있지 않습니다. 진단 탭을 확인하세요.')
         try:
-            guild = self.bot.get_guild(int(guild_id))
+            guild = bot.get_guild(int(guild_id))
         except (ValueError, TypeError):
             guild = None
         if guild is None:
-            raise ValueError('서버를 선택하세요.')
+            raise ValueError(f'{self.bot_label(bot)}이 들어가 있는 Discord 서버를 선택하세요.')
         return guild
 
     async def state(self, request):
+        target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
+        target_bot = self.target_bot(target)
         teams = await self.store.teams()
-        guilds = []
-        for g in self.bot.guilds:
-            guilds.append({'id': str(g.id), 'name': g.name})
+        guilds = [{'id': str(g.id), 'name': g.name} for g in target_bot.guilds]
         guild_id = request.query.get('guild_id')
-        guild = self.bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (self.bot.guilds[0] if self.bot.guilds else None)
-        active = await self.store.get_team(guild.id) if guild else 'A팀'
+        guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
+        active = await self.store.get_team(guild.id, target) if guild else 'A팀'
         team = clean_name(request.query.get('team') or active, '팀 이름')
         if team not in teams:
             teams.append(team)
@@ -344,15 +392,18 @@ class WebPanel:
         if guild:
             for c in guild.voice_channels:
                 perms = c.permissions_for(guild.me) if guild.me else None
-                channels.append({'id': str(c.id), 'name': c.name, 'members': len([m for m in c.members if not m.bot]), 'available': bool(perms and perms.view_channel and perms.connect and perms.speak)})
+                channels.append({'id': str(c.id), 'name': c.name,
+                                 'members': len([m for m in c.members if not m.bot]),
+                                 'available': bool(perms and perms.view_channel and perms.connect and perms.speak)})
         return response({
-            'ready': self.bot.is_ready(), 'webOnly': self.s.web_only, 'storage': self.store.mode,
+            'ready': target_bot.is_ready(), 'webOnly': self.s.web_only, 'storage': self.store.mode,
+            'botTarget': target, 'botLabel': self.bot_label(target_bot), 'botTargets': self.bot_targets(),
             'guilds': guilds, 'guildId': str(guild.id) if guild else None,
             'teams': teams, 'team': team, 'activeTeam': active, 'songs': songs,
             'library': library, 'categories': SONG_CATEGORIES, 'fileStorage': storage_status(self.s),
             'lineup': await self.store.lineup(team), 'state': state, 'channels': channels,
-            'voice': self.bot.player.voice.status(guild) if guild else None,
-            'nowPlaying': self.bot.player.now.get(guild.id) if guild else None,
+            'voice': target_bot.player.voice.status(guild) if guild else None,
+            'nowPlaying': target_bot.player.now.get(guild.id) if guild else None,
             'events': self._event_rows(events),
             'maxUploadMb': self.s.max_upload_mb,
         })
@@ -468,8 +519,9 @@ class WebPanel:
         team = clean_name(data.get('team'), '팀 이름')
         await self.store.create_team(team)
         if data.get('activate'):
-            guild = self.guild(data.get('guildId'))
-            await self.store.set_team(guild.id, team)
+            target = 'secondary' if data.get('botTarget') == 'secondary' else 'primary'
+            guild = self.guild(data.get('guildId'), target)
+            await self.store.set_team(guild.id, team, target)
         return response({'ok': True})
 
     async def save_song(self, request):
@@ -496,13 +548,16 @@ class WebPanel:
         if old_name and old_name != song['name'] and song['category'] == 'entrance':
             # Refresh existing Discord lineup messages; a display failure must not
             # roll back or misreport a successfully committed nickname change.
-            if hasattr(self.bot, 'refresh_lineup'):
-                for guild in self.bot.guilds:
-                    if await self.store.get_team(guild.id) == team:
+            for candidate in self.all_bots():
+                if not hasattr(candidate, 'refresh_lineup'):
+                    continue
+                for guild in candidate.guilds:
+                    if await self.store.get_team(guild.id, candidate.slot) == team:
                         try:
-                            await self.bot.refresh_lineup(guild)
+                            await candidate.refresh_lineup(guild)
                         except Exception:
-                            log.warning('닉네임 변경 후 Discord 타순 표시 갱신 실패: guild=%s', guild.id)
+                            log.warning('닉네임 변경 후 Discord 타순 표시 갱신 실패: bot=%s guild=%s',
+                                        self.bot_label(candidate), guild.id)
         return response({'ok': True, 'name': song['name'], 'category': song['category'], 'warning': warning})
 
     async def delete_song(self, request):
@@ -600,14 +655,16 @@ class WebPanel:
 
     async def control(self, request):
         d = await body(request)
-        guild = self.guild(d.get('guildId'))
-        team = clean_name(d.get('team') or await self.store.get_team(guild.id))
+        target = 'secondary' if d.get('botTarget') == 'secondary' else 'primary'
+        target_bot = self.target_bot(target)
+        guild = self.guild(d.get('guildId'), target)
+        team = clean_name(d.get('team') or await self.store.get_team(guild.id, target))
         action = d.get('action')
         channel_id = d.get('channelId') if action in {'connect', 'play', 'order', 'next', 'event'} else None
         channel = guild.get_channel(int(channel_id)) if channel_id else None
         if channel_id and channel is None:
             raise ValueError('선택한 통화방이 없습니다.')
-        player = self.bot.player
+        player = target_bot.player
         if action == 'connect':
             await player.voice.connect(guild, channel)
         elif action == 'disconnect':
@@ -639,16 +696,18 @@ class WebPanel:
             await player.event(guild, team, key, channel)
         else:
             raise ValueError('알 수 없는 명령입니다.')
-        manage_idle = getattr(self.bot, 'manage_idle', None)
+        manage_idle = getattr(target_bot, 'manage_idle', None)
         if manage_idle:
             await manage_idle(guild)
-        if action in {'order', 'next'} and hasattr(self.bot, 'refresh_lineup'):
-            await self.bot.refresh_lineup(guild)
-        return response({'ok': True, 'voice': player.voice.status(guild), 'nowPlaying': player.now.get(guild.id)})
+        if action in {'order', 'next'} and hasattr(target_bot, 'refresh_lineup'):
+            await target_bot.refresh_lineup(guild)
+        return response({'ok': True, 'botTarget': target, 'botLabel': self.bot_label(target_bot),
+                         'voice': player.voice.status(guild), 'nowPlaying': player.now.get(guild.id)})
 
     async def diagnostics(self, request):
         return response({
             'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only,
+            'bots': self.bot_targets(),
             'storage': self.store.mode, 'fileStorage': storage_status(self.s),
             'apiVersion': 2, 'authMode': request['session'].get('mode', 'cookie'),
             'publicUrl': self.s.public_url, 'webUrl': self.s.web_url,
@@ -666,7 +725,8 @@ class WebPanel:
                 'Discord Developer Portal → Bot → Message Content Intent 켜기 (!명령어용)',
                 '통화방 권한 덮어쓰기에서 채널 보기·연결·말하기 허용',
                 '서버 음소거 해제, 통화방 인원 제한 확인',
-                '같은 DISCORD_TOKEN으로 봇을 두 곳에서 실행하지 않기 (replica=1)',
+                '같은 토큰을 두 봇에 중복 사용하지 않기. 보조 봇은 DISCORD_TOKEN_SECONDARY에 별도 토큰 사용',
+                'Railway replica는 1개 유지. 한 프로세스 안에서 청팀/백팀 봇 두 계정을 함께 실행',
                 '음성 연결은 UDP 송수신이 필요함. HTTP 포트만 열어서는 해결되지 않음',
                 'YouTube 링크 재생에는 Deno와 yt-dlp-ejs도 필요함. Docker 이미지에 포함',
                 'YouTube 차단은 음성 연결 오류와 별개. MP3 업로드로 구분 테스트',

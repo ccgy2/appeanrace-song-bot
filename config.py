@@ -70,6 +70,7 @@ def flag(name: str, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class Settings:
     token: str = ''
+    secondary_token: str = ''
     firebase_key: str = ''
     owner_id: int = 0
     data_dir: Path = ROOT / 'data'
@@ -90,6 +91,8 @@ class Settings:
     cookies_path: str = ''
     cookies_b64: str = ''
     enable_members_intent: bool = False
+    primary_bot_label: str = '청팀 봇'
+    secondary_bot_label: str = '백팀 봇'
     on_railway: bool = False
     volume_path: Path | None = None
 
@@ -125,6 +128,8 @@ class Settings:
 
         s = cls(
             token=os.getenv('DISCORD_TOKEN', '').strip(),
+            secondary_token=(os.getenv('DISCORD_TOKEN_SECONDARY', '').strip()
+                             or os.getenv('DISCORD_TOKEN_2', '').strip()),
             firebase_key=os.getenv('FIREBASE_SERVICE_ACCOUNT', '').strip(),
             owner_id=int(os.getenv('OWNER_ID', '0') or 0),
             data_dir=data_dir,
@@ -147,6 +152,8 @@ class Settings:
             cookies_path=os.getenv('YTDLP_COOKIES_PATH', '').strip(),
             cookies_b64=os.getenv('YTDLP_COOKIES_B64', '').strip(),
             enable_members_intent=flag('ENABLE_MEMBERS_INTENT'),
+            primary_bot_label=os.getenv('PRIMARY_BOT_LABEL', '청팀 봇').strip() or '청팀 봇',
+            secondary_bot_label=os.getenv('SECONDARY_BOT_LABEL', '백팀 봇').strip() or '백팀 봇',
         )
         if not 1 <= s.port <= 65535:
             raise ValueError('PORT는 1~65535여야 합니다.')
@@ -154,6 +161,8 @@ class Settings:
             raise ValueError('WEB_ADMIN_PASSWORD를 12자 이상의 새 비밀번호로 바꾸세요.')
         if not s.web_only and not s.token:
             raise ValueError('DISCORD_TOKEN을 설정하세요. 화면만 확인하려면 WEB_ONLY=true를 사용하세요.')
+        if s.secondary_token and s.secondary_token == s.token:
+            raise ValueError('DISCORD_TOKEN_SECONDARY는 기존 DISCORD_TOKEN과 다른 보조 봇 토큰이어야 합니다.')
         if s.web_enabled and not s.web_password:
             raise ValueError('웹 관리 화면을 쓰려면 WEB_ADMIN_PASSWORD를 설정하세요. Railway Variables에 12자 이상의 관리자 비밀번호를 지정하세요.')
         if url and not url.startswith(('https://', 'http://')):

@@ -121,26 +121,34 @@ class Store:
         team = clean_name(team, '팀 이름')
         await self._run(self._write, f'teams/{team}', {'name': team}, True)
 
-    async def get_team(self, guild_id: int) -> str:
-        d = await self._run(self._read, f'guilds/{guild_id}')
-        return (d or {}).get('team', 'A팀')
+    @staticmethod
+    def _slot_key(slot: str, primary_key: str, secondary_key: str) -> str:
+        return secondary_key if str(slot or 'primary').lower() == 'secondary' else primary_key
 
-    async def set_team(self, guild_id: int, team: str):
+    async def get_team(self, guild_id: int, slot: str = 'primary') -> str:
+        d = await self._run(self._read, f'guilds/{guild_id}')
+        key = self._slot_key(slot, 'team', 'teamSecondary')
+        return (d or {}).get(key, 'A팀')
+
+    async def set_team(self, guild_id: int, team: str, slot: str = 'primary'):
         await self.create_team(team)
-        await self._run(self._write, f'guilds/{guild_id}', {'team': team}, True)
+        key = self._slot_key(slot, 'team', 'teamSecondary')
+        await self._run(self._write, f'guilds/{guild_id}', {key: team}, True)
 
-    async def get_notification_channel(self, guild_id: int) -> int | None:
+    async def get_notification_channel(self, guild_id: int, slot: str = 'primary') -> int | None:
         d = await self._run(self._read, f'guilds/{guild_id}')
-        value = (d or {}).get('notificationChannelId')
+        key = self._slot_key(slot, 'notificationChannelId', 'notificationChannelIdSecondary')
+        value = (d or {}).get(key)
         try:
             return int(value) if value else None
         except (TypeError, ValueError):
             return None
 
-    async def set_notification_channel(self, guild_id: int, channel_id: int | None):
+    async def set_notification_channel(self, guild_id: int, channel_id: int | None, slot: str = 'primary'):
         # 같은 guild 문서에 merge하여 현재 팀 설정을 보존한다. None은 '자동 선택'을 뜻한다.
         value = int(channel_id) if channel_id else None
-        await self._run(self._write, f'guilds/{guild_id}', {'notificationChannelId': value}, True)
+        key = self._slot_key(slot, 'notificationChannelId', 'notificationChannelIdSecondary')
+        await self._run(self._write, f'guilds/{guild_id}', {key: value}, True)
 
     async def songs(self, team: str, category: str = 'entrance') -> list[dict]:
         category = song_category(category)

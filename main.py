@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shutil
 import time
+from dataclasses import replace
 from pathlib import Path
 import discord
 from discord.ext import commands
@@ -51,19 +52,24 @@ async def notify(channel, text=None, *, embed=None):
 
 
 class AppearanceBot(commands.Bot):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, slot: str = 'primary', label: str | None = None,
+                 command_prefix: str = '!', web_owner: bool = True):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
         # 통화방 입장 이벤트에는 members privileged intent가 필수가 아니다.
         intents.members = settings.enable_members_intent
-        super().__init__(command_prefix='!', intents=intents, help_command=None,
+        super().__init__(command_prefix=command_prefix, intents=intents, help_command=None,
                          allowed_mentions=discord.AllowedMentions.none())
         self.settings = settings
+        self.slot = 'secondary' if slot == 'secondary' else 'primary'
+        self.label = label or (settings.secondary_bot_label if self.slot == 'secondary' else settings.primary_bot_label)
+        self.web_owner = bool(web_owner)
+        self.peer_bot: AppearanceBot | None = None
         self.store = Store(settings)
         self.assets = Assets(settings)
         self.player = Player(settings, self.store, self.assets)
-        self.panel = WebPanel(self)
+        self.panel = WebPanel(self) if self.web_owner else None
         self.idle_tasks: dict[int, asyncio.Task] = {}
         self.join_cooldowns: dict[tuple[int, int], float] = {}
         self.lineup_messages: dict[int, discord.Message] = {}
@@ -71,7 +77,7 @@ class AppearanceBot(commands.Bot):
 
     async def setup_hook(self):
         self.add_view(LineupView(self))
-        if self.settings.web_enabled:
+        if self.web_owner and self.settings.web_enabled and self.panel is not None:
             if self.settings.web_password:
                 await self.panel.start()
             else:
@@ -81,13 +87,14 @@ class AppearanceBot(commands.Bot):
         for task in self.idle_tasks.values():
             task.cancel()
         await asyncio.gather(*self.idle_tasks.values(), return_exceptions=True)
-        await self.panel.close()
+        if self.panel is not None:
+            await self.panel.close()
         await super().close()
         await self.player.close()
         await self.store.close()
 
     async def on_ready(self):
-        log.info('Discord 로그인 완료: %s / discord.py %s', self.user, discord.__version__)
+        log.info('Discord 로그인 완료 [%s]: %s / discord.py %s', self.label, self.user, discord.__version__)
         if not shutil.which(self.settings.ffmpeg):
             log.error('FFmpeg 미설치: 통화방 접속은 가능해도 오디오 재생이 불가능합니다.')
         for guild in self.guilds:
@@ -98,13 +105,13 @@ class AppearanceBot(commands.Bot):
             return
         original = getattr(error, 'original', error)
         if isinstance(error, commands.MissingRequiredArgument):
-            msg = f'입력값이 부족합니다. `!도움`을 확인하세요. ({error.param.name})'
+            msg = f'입력값이 부족합니다. `{"!2" if self.slot == "secondary" else "!"}도움`을 확인하세요. ({error.param.name})'
         elif isinstance(error, commands.NoPrivateMessage):
             msg = '서버의 텍스트 채널에서 사용하세요.'
         elif isinstance(error, commands.CheckFailure):
             msg = '관리자 / 등장곡 재생인 / OWNER_ID만 사용할 수 있습니다.'
         elif isinstance(error, commands.BadArgument):
-            msg = '입력 형식이 잘못됐습니다. `!도움`을 확인하세요.'
+            msg = f'입력 형식이 잘못됐습니다. `{"!2" if self.slot == "secondary" else "!"}도움`을 확인하세요.'
         elif isinstance(original, (ValueError, VoiceError)):
             msg = str(original)
         elif isinstance(original, discord.Forbidden):
@@ -116,7 +123,7 @@ class AppearanceBot(commands.Bot):
 
     async def notification_channel(self, guild, fallback=None):
         """저장된 봇 출력 채널을 반환하고, 사용할 수 없으면 안전한 기본 채널을 사용합니다."""
-        channel_id = await self.store.get_notification_channel(guild.id)
+        channel_id = await self.store.get_notification_channel(guild.id, self.slot)
         if channel_id:
             channel = guild.get_channel(channel_id)
             if channel is not None and guild.me is not None:
@@ -132,7 +139,7 @@ class AppearanceBot(commands.Bot):
     async def now_embed(self, guild, channel, team: str):
         playing = self.player.now.get(guild.id, {})
         state = await self.store.state(team)
-        embed = discord.Embed(title='🎶 등장곡 플레이어', color=discord.Color.green())
+        embed = discord.Embed(title=f'🎶 {self.label} · 등장곡 플레이어', color=discord.Color.green())
         embed.add_field(name='현재 곡', value=playing.get('title', '대기 중'), inline=False)
         embed.add_field(name='팀', value=team)
         embed.add_field(name='볼륨', value=f'{round(state["volume"] * 100)}%')
@@ -152,10 +159,10 @@ class AppearanceBot(commands.Bot):
             log.warning('재생 안내 메시지 갱신 실패')
 
     async def lineup_embed(self, guild):
-        team = await self.store.get_team(guild.id)
+        team = await self.store.get_team(guild.id, self.slot)
         state = await self.store.state(team)
         lineup = await self.store.lineup(team)
-        embed = discord.Embed(title=f'⚾ {team} 라인업 (현재 {state["currentOrder"]}번)', color=discord.Color.blurple())
+        embed = discord.Embed(title=f'⚾ {self.label} · {team} 라인업 (현재 {state["currentOrder"]}번)', color=discord.Color.blurple())
         for i in range(1, 10):
             embed.add_field(name=f'{i}번', value=lineup.get(str(i)) or '-', inline=True)
         embed.set_footer(text='관리자 / 등장곡 재생인 / OWNER_ID 조작 가능 · 웹에서 곡·타순 등록')
@@ -172,7 +179,7 @@ class AppearanceBot(commands.Bot):
     async def play_order(self, guild, order: int, channel, voice_channel=None):
         if not 1 <= order <= 9:
             raise ValueError('타순은 1~9번입니다.')
-        team = await self.store.get_team(guild.id)
+        team = await self.store.get_team(guild.id, self.slot)
         name = (await self.store.lineup(team)).get(str(order))
         song = await self.store.song(team, name) if name else None
         if song is None:
@@ -201,12 +208,12 @@ class AppearanceBot(commands.Bot):
             vc = guild.voice_client
             if not vc or not vc.channel or any(not m.bot for m in vc.channel.members):
                 return
-            await notify(await self.notification_channel(guild), f'⏱ 통화방에 사람이 없어 {min(30, wait)}초 후 퇴장합니다.')
+            await notify(await self.notification_channel(guild), f'⏱ [{self.label}] 통화방에 사람이 없어 {min(30, wait)}초 후 퇴장합니다.')
             await asyncio.sleep(min(30, wait))
             vc = guild.voice_client
             if vc and vc.channel and not any(not m.bot for m in vc.channel.members):
                 await self.player.leave(guild)
-                await notify(await self.notification_channel(guild), '🔇 빈 통화방에서 자동 퇴장했습니다.')
+                await notify(await self.notification_channel(guild), f'🔇 [{self.label}] 빈 통화방에서 자동 퇴장했습니다.')
         finally:
             if self.idle_tasks.get(guild.id) is asyncio.current_task():
                 self.idle_tasks.pop(guild.id, None)
@@ -228,9 +235,11 @@ class AppearanceBot(commands.Bot):
             self.join_cooldowns = {k: t for k, t in self.join_cooldowns.items() if now - t < 60}
         channel = await self.notification_channel(guild)
         try:
-            # 현재 팀을 먼저 찾되, 예전처럼 다른 팀에 등록된 사용자 ID도 이어서 찾는다.
-            current = await self.store.get_team(guild.id)
-            teams = [current] + [t for t in await self.store.teams() if t != current]
+            # 2봇 모드에서는 각 봇에 지정한 팀만 자동 재생한다.
+            # 그래야 청팀 봇/백팀 봇이 같은 입장 이벤트를 동시에 잡아채지 않는다.
+            # 보조 봇 토큰이 없는 1봇 모드에서는 기존 호환성을 위해 다른 팀도 이어서 찾는다.
+            current = await self.store.get_team(guild.id, self.slot)
+            teams = [current] if self.settings.secondary_token else [current] + [t for t in await self.store.teams() if t != current]
             member_id = str(member.id)
             has_legacy_role = any(r.name == ENTRANCE_ROLE for r in getattr(member, 'roles', []))
 
@@ -251,14 +260,14 @@ class AppearanceBot(commands.Bot):
                         return
                 ok = await self.player.play(guild, team, song, after.channel, order)
                 if ok:
-                    await self.store.set_team(guild.id, team)
+                    await self.store.set_team(guild.id, team, self.slot)
                     await self.now_embed(guild, channel, team)
                 return
         except (ValueError, VoiceError) as exc:
-            await notify(channel, '❌ 자동 등장곡: ' + str(exc))
+            await notify(channel, f'❌ [{self.label}] 자동 등장곡: ' + str(exc))
         except Exception:
             log.exception('자동 등장곡 오류')
-            await notify(channel, '❌ 자동 등장곡 처리 오류. 웹 진단 탭과 서버 로그를 확인하세요.')
+            await notify(channel, f'❌ [{self.label}] 자동 등장곡 처리 오류. 웹 진단 탭과 서버 로그를 확인하세요.')
 
 
 class Control(discord.ui.Button):
@@ -270,7 +279,7 @@ class Control(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         guild = interaction.guild
-        team = await self.app.store.get_team(guild.id)
+        team = await self.app.store.get_team(guild.id, self.app.slot)
         voice = member_channel(interaction.user)
         if self.action == 'stop':
             self.app.player.stop(guild)
@@ -342,22 +351,22 @@ def install_commands(bot: AppearanceBot):
         perms = target.permissions_for(ctx.guild.me)
         if not (perms.view_channel and perms.send_messages and perms.embed_links):
             raise ValueError('지정할 채널에서 봇에게 채널 보기, 메시지 보내기, 링크 임베드 권한이 필요합니다.')
-        await bot.store.set_notification_channel(ctx.guild.id, target.id)
+        await bot.store.set_notification_channel(ctx.guild.id, target.id, bot.slot)
         old = bot.now_messages.pop(ctx.guild.id, None)
         if old and old.channel.id != target.id:
             try:
                 await old.delete()
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
-        await ctx.send(f'✅ 등장곡 봇 알림 채널을 {target.mention} 로 지정했습니다. 재시작/재배포 후에도 유지됩니다.')
+        await ctx.send(f'✅ {bot.label} 알림 채널을 {target.mention} 로 지정했습니다. 재시작/재배포 후에도 유지됩니다.')
 
     @bot.command(name='알림채널')
     async def show_notification_channel(ctx):
-        channel_id = await bot.store.get_notification_channel(ctx.guild.id)
+        channel_id = await bot.store.get_notification_channel(ctx.guild.id, bot.slot)
         if channel_id:
             channel = ctx.guild.get_channel(channel_id)
             if channel is not None:
-                await ctx.send(f'📢 현재 등장곡 봇 알림 채널: {channel.mention}')
+                await ctx.send(f'📢 현재 {bot.label} 알림 채널: {channel.mention}')
                 return
             await ctx.send(f'⚠️ 저장된 알림 채널(ID: {channel_id})을 찾을 수 없습니다. `!알림채널설정`으로 다시 지정하세요.')
             return
@@ -366,9 +375,9 @@ def install_commands(bot: AppearanceBot):
     @bot.command(name='알림채널해제', aliases=['출력채널해제'])
     @admin_only()
     async def clear_notification_channel(ctx):
-        await bot.store.set_notification_channel(ctx.guild.id, None)
+        await bot.store.set_notification_channel(ctx.guild.id, None, bot.slot)
         bot.now_messages.pop(ctx.guild.id, None)
-        await ctx.send('✅ 알림 채널 지정을 해제했습니다. 이제 메시지를 보낼 수 있는 채널을 자동 선택합니다.')
+        await ctx.send(f'✅ {bot.label} 알림 채널 지정을 해제했습니다. 이제 메시지를 보낼 수 있는 채널을 자동 선택합니다.')
 
     @bot.command(name='입장')
     async def join(ctx):
@@ -391,26 +400,26 @@ def install_commands(bot: AppearanceBot):
     @bot.command(name='팀')
     @manager()
     async def team(ctx, *, name: str):
-        await bot.store.set_team(ctx.guild.id, clean_name(name))
-        await ctx.send('✅ 현재 팀: ' + name)
+        await bot.store.set_team(ctx.guild.id, clean_name(name), bot.slot)
+        await ctx.send(f'✅ {bot.label} 현재 팀: ' + name)
 
     @bot.command(name='볼륨')
     @manager()
     async def volume(ctx, value: int):
-        await bot.player.volume(ctx.guild, await bot.store.get_team(ctx.guild.id), value)
+        await bot.player.volume(ctx.guild, await bot.store.get_team(ctx.guild.id, bot.slot), value)
         await ctx.send(f'🔊 볼륨 {value}% (재생 중인 곡에도 반영)')
 
     @bot.command(name='저장', aliases=['변경'])
     @manager()
     async def save(ctx, *, args: str):
         song = parse_song_args(args)
-        await bot.store.save_song(await bot.store.get_team(ctx.guild.id), song)
+        await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
         await ctx.send('✅ 등장곡 저장: ' + song['name'])
 
     @bot.command(name='미리듣기')
     @manager()
     async def preview(ctx, *, name: str):
-        team = await bot.store.get_team(ctx.guild.id)
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
         song = await bot.store.song(team, clean_name(name))
         if not song:
             raise ValueError('등록된 등장곡이 없습니다.')
@@ -422,7 +431,7 @@ def install_commands(bot: AppearanceBot):
     @bot.command(name='재생')
     @manager()
     async def play(ctx, *, name: str):
-        team = await bot.store.get_team(ctx.guild.id)
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
         song = await bot.store.song(team, clean_name(name))
         if not song:
             raise ValueError('등록된 등장곡이 없습니다.')
@@ -432,7 +441,7 @@ def install_commands(bot: AppearanceBot):
         await bot.manage_idle(ctx.guild)
 
     async def play_library_category(ctx, category: str, name: str):
-        team = await bot.store.get_team(ctx.guild.id)
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
         song = await bot.store.song(team, clean_name(name), category)
         if not song:
             raise ValueError('이 종류에 등록된 곡이 없습니다. 웹 음악 라이브러리를 확인하세요.')
@@ -455,14 +464,14 @@ def install_commands(bot: AppearanceBot):
     @manager()
     async def save_cheer(ctx, *, args: str):
         song = {**parse_song_args(args), 'category': 'cheer'}
-        await bot.store.save_song(await bot.store.get_team(ctx.guild.id), song)
+        await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
         await ctx.send('✅ 응원가 저장: ' + song['name'])
 
     @bot.command(name='상황곡저장')
     @manager()
     async def save_situation(ctx, *, args: str):
         song = {**parse_song_args(args), 'category': 'situation'}
-        await bot.store.save_song(await bot.store.get_team(ctx.guild.id), song)
+        await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
         await ctx.send('✅ 상황별 노래 저장: ' + song['name'])
 
     @bot.command(name='타순', aliases=['교체'])
@@ -471,7 +480,7 @@ def install_commands(bot: AppearanceBot):
         if not 1 <= num <= 9:
             raise ValueError('타순은 1~9번입니다.')
         name = args.lstrip('/').strip()
-        team = await bot.store.get_team(ctx.guild.id)
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
         await bot.store.save_lineup(team, {str(num): clean_name(name)})
         await ctx.send(f'✅ {num}번 타자: {name}')
         await bot.refresh_lineup(ctx.guild)
@@ -482,7 +491,7 @@ def install_commands(bot: AppearanceBot):
         if key not in EVENTS:
             raise ValueError('효과음 키: ' + ', '.join(EVENTS))
         bot.assets.legacy_file(key, filename)
-        await bot.store.set_event(await bot.store.get_team(ctx.guild.id), key, {'file': filename})
+        await bot.store.set_event(await bot.store.get_team(ctx.guild.id, bot.slot), key, {'file': filename})
         await ctx.send('✅ 효과음 저장: ' + key)
 
     async def role_change(ctx, member, remove: bool):
@@ -514,7 +523,7 @@ def install_commands(bot: AppearanceBot):
 
     @bot.command(name='이름변경')
     async def rename(ctx, *, args: str):
-        team = await bot.store.get_team(ctx.guild.id)
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
         if ' / ' in args:
             if not can_manage(ctx.author, bot.settings):
                 raise commands.CheckFailure()
@@ -562,48 +571,75 @@ def install_commands(bot: AppearanceBot):
 
     @bot.command(name='도움', aliases=['help'])
     async def help_command(ctx):
+        p = '!2' if bot.slot == 'secondary' else '!'
         await ctx.send(
-            '**⚾ 등장곡 봇 사용법**\n'
-            '`!입장` · `!퇴장` · `!정지` · `!진단` · `!웹`\n'
-            '`!팀 팀명` · `!볼륨 0~100`\n'
-            '`!저장 이름 / YouTube주소 / 0:10~0:40` (`!변경`도 가능)\n'
-            '`!미리듣기 이름` (5초) · `!재생 이름` (등장곡)\n'
-            '`!응원가 이름` · `!상황곡 이름`\n'
-            '`!응원가저장 이름 / YouTube주소 / 0:00~1:00`\n'
-            '`!상황곡저장 이름 / YouTube주소 / 0:00~0:30`\n'
-            '`!타순 1 / 이름` · `!교체 1 / 이름` · `!라인업`\n'
-            '`!이벤트저장 키 파일명` (파일은 sounds 안에 있어야 함)\n'
-            '`!등장곡역할주기 @유저` · `!등장곡역할회수 @유저` (관리자/OWNER_ID 전용)\n'
-            '`!이름변경 새이름` · `!이름변경 기존이름 / 새이름`\n'
+            f'**⚾ {bot.label} 사용법**\n'
+            f'`{p}입장` · `{p}퇴장` · `{p}정지` · `{p}진단` · `{p}웹`\n'
+            f'`{p}팀 팀명` · `{p}볼륨 0~100`\n'
+            f'`{p}저장 이름 / YouTube주소 / 0:10~0:40` (`{p}변경`도 가능)\n'
+            f'`{p}미리듣기 이름` (5초) · `{p}재생 이름` (등장곡)\n'
+            f'`{p}응원가 이름` · `{p}상황곡 이름`\n'
+            f'`{p}응원가저장 이름 / YouTube주소 / 0:00~1:00`\n'
+            f'`{p}상황곡저장 이름 / YouTube주소 / 0:00~0:30`\n'
+            f'`{p}타순 1 / 이름` · `{p}교체 1 / 이름` · `{p}라인업`\n'
+            f'`{p}알림채널설정 #채널` · `{p}알림채널` · `{p}알림채널해제`\n'
+            f'`{p}이벤트저장 키 파일명` (파일은 sounds 안에 있어야 함)\n'
+            f'`{p}등장곡역할주기 @유저` · `{p}등장곡역할회수 @유저` (관리자/OWNER_ID 전용)\n'
+            f'`{p}이름변경 새이름` · `{p}이름변경 기존이름 / 새이름`\n'
             '관리자 / 등장곡 재생인 / OWNER_ID가 곡·타순·재생을 관리합니다.\n'
-            '자동 입장곡: 등장곡 재생인 역할 + 타순 등록 + 닉네임 일치 또는 사용자 ID 등록'
+            '2봇 모드에서는 각 봇에 웹에서 지정한 경기 팀의 등장곡만 자동 재생합니다.'
         )
 
 
-def create_bot(settings: Settings) -> AppearanceBot:
-    bot = AppearanceBot(settings)
+def create_bot(settings: Settings, *, slot: str = 'primary', label: str | None = None,
+               command_prefix: str = '!', web_owner: bool = True) -> AppearanceBot:
+    bot = AppearanceBot(settings, slot=slot, label=label, command_prefix=command_prefix, web_owner=web_owner)
     install_commands(bot)
     return bot
 
 
 async def run():
     settings = Settings.from_env()
-    bot = create_bot(settings)
+    primary = create_bot(
+        settings, slot='primary', label=settings.primary_bot_label,
+        command_prefix='!', web_owner=True,
+    )
+    secondary = None
+    if settings.secondary_token and not settings.web_only:
+        secondary_settings = replace(settings, token=settings.secondary_token, web_enabled=False)
+        secondary = create_bot(
+            secondary_settings, slot='secondary', label=settings.secondary_bot_label,
+            command_prefix='!2', web_owner=False,
+        )
+        primary.peer_bot = secondary
+        secondary.peer_bot = primary
+        log.info('2봇 모드 활성화: %s + %s', primary.label, secondary.label)
+    elif not settings.web_only:
+        log.info('1봇 모드: DISCORD_TOKEN_SECONDARY가 없어 기존 봇만 실행합니다.')
+
     try:
         if settings.web_only:
             log.warning('WEB_ONLY=true: 웹 관리 화면만 실행합니다. Discord 접속/재생은 하지 않습니다.')
-            await bot.panel.start()
+            if primary.panel is None:
+                raise RuntimeError('웹 패널을 시작할 수 없습니다.')
+            await primary.panel.start()
             await asyncio.Event().wait()
+        elif secondary is not None:
+            await asyncio.gather(
+                primary.start(settings.token),
+                secondary.start(settings.secondary_token),
+            )
         else:
-            await bot.start(settings.token)
+            await primary.start(settings.token)
     except discord.PrivilegedIntentsRequired:
         log.error('Discord Developer Portal → Bot → Message Content Intent를 켜세요. ENABLE_MEMBERS_INTENT=true면 Server Members Intent도 켜야 합니다.')
         raise
     except discord.LoginFailure:
-        log.error('DISCORD_TOKEN이 유효하지 않습니다. 봇 토큰을 확인하세요. 토큰을 채팅에 보내지 마세요.')
+        log.error('Discord 봇 토큰이 유효하지 않습니다. DISCORD_TOKEN / DISCORD_TOKEN_SECONDARY를 확인하세요. 토큰을 채팅에 보내지 마세요.')
         raise
     finally:
-        await bot.close()
+        bots = [primary] + ([secondary] if secondary is not None else [])
+        await asyncio.gather(*(b.close() for b in bots), return_exceptions=True)
 
 
 if __name__ == '__main__':
