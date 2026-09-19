@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#10141e"><title>APPEARANCE · 우리 팀 음악 스튜디오</title>
-<link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script src="/config.js" defer></script><script src="/app.js" defer></script>
+<link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css?v=20260919-3"><script src="/config.js?v=20260919-3" defer></script><script src="/app.js?v=20260919-3" defer></script>
 </head>
 <body>
 <div id="login-screen" class="login-screen">
@@ -24,15 +24,16 @@
   </aside>
   <main>
     <header class="topbar"><div><span class="eyebrow">YOUR TEAM, YOUR SOUND</span><h1 id="page-title">음악 라이브러리</h1></div><div class="topbar-actions"><span class="badge" id="storage-badge">저장소</span><button id="logout-mobile" class="ghost mobile-only">로그아웃</button><button id="refresh" class="ghost">↻ 새로고침</button></div></header>
-    <section class="workspace card" aria-label="서버와 팀 선택">
+    <section class="workspace card" aria-label="봇, 서버와 팀 선택">
+      <label>재생 봇<select id="bot-select"><option value="primary">청팀 봇</option><option value="secondary">백팀 봇</option></select></label>
       <label>Discord 서버<select id="guild-select"><option value="">연결된 서버 없음</option></select></label>
       <label>관리할 팀<select id="team-select"></select></label>
-      <button id="new-team" class="ghost">＋ 팀 추가</button><button id="activate-team" class="soft">이 팀으로 경기 진행</button>
+      <button id="new-team" class="ghost">＋ 팀 추가</button><button id="activate-team" class="soft">이 봇의 경기 팀으로 설정</button>
     </section>
     <p id="workspace-note" class="notice" hidden></p>
     <section id="storage-notice" class="storage-notice" role="status"><strong id="storage-title">오디오 저장소 확인 중</strong><p id="storage-message" class="tiny"></p></section>
     <section class="voice-bar card" aria-label="통화방 제어">
-      <div class="voice-info"><div class="voice-icon">◖))</div><div><strong id="voice-title">통화방 연결</strong><p id="voice-detail" class="tiny">통화방을 선택하고 연결하세요.</p></div></div>
+      <div class="voice-info"><div class="voice-icon">◖))</div><div><strong><span id="voice-bot-label">청팀 봇</span> 통화방 연결</strong><p id="voice-detail" class="tiny">통화방을 선택하고 연결하세요.</p></div></div>
       <div class="voice-controls"><select id="voice-select" aria-label="통화방 선택"><option value="">통화방 선택</option></select><button id="connect" class="primary">연결</button><button id="disconnect" class="ghost">퇴장</button></div>
     </section>
     <p id="voice-error" class="notice danger" hidden></p>
@@ -73,7 +74,16 @@
     </section>
     <section id="tab-events" class="tab-panel" hidden>
       <div class="section-intro"><p class="eyebrow accent">GAME SOUNDBOARD</p><h2>경기의 순간마다, 사운드.</h2><p class="muted">기본 상황은 그대로 두고, 관리자가 원하는 경기 상황을 직접 추가할 수 있어요. 추가한 상황마다 상황별 노래나 오디오 파일을 연결하고 바로 재생할 수 있습니다.</p></div>
-      <section class="card admin-only" id="event-create-card"><div class="section-head"><div><h3>새 경기 상황 추가</h3><p class="tiny">예: 상대 투수 교체, 작전타임, 역전 득점, 승리 세리머니</p></div></div><form id="event-create-form" class="event-create-form"><label for="event-name">상황 이름</label><div class="event-create-row"><input id="event-name" maxlength="64" required placeholder="예: 상대 투수 교체"><button class="primary" type="submit">+ 상황 추가</button></div></form></section>
+      <section class="card admin-only" id="event-create-card"><div class="section-head"><div><h3>새 경기 상황 추가</h3><p class="tiny">예: 상대 투수 교체, 작전타임, 역전 득점, 승리 세리머니</p></div></div><form id="event-create-form" class="event-create-form">
+        <label for="event-name">상황 이름</label>
+        <div class="event-create-row"><input id="event-name" maxlength="64" required placeholder="예: 상대 투수 교체"><button class="primary" type="submit">+ 상황 추가</button></div>
+        <label for="event-create-mode">처음 사용할 재생 방식</label>
+        <select id="event-create-mode">
+          <option value="single">단곡</option>
+          <option value="random">랜덤</option>
+          <option value="sequence">여러곡 순차</option>
+        </select>
+      </form></section>
       <div id="events-grid" class="events-grid"></div>
     </section>
     <section id="tab-diagnostics" class="tab-panel" hidden>
