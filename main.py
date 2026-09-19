@@ -433,8 +433,9 @@ def install_commands(bot: AppearanceBot):
 
     @bot.command(name='웹')
     async def panel(ctx):
-        if bot.settings.public_url:
-            await ctx.send('🌐 등장곡 관리: ' + bot.settings.public_url + '\n관리자 웹 비밀번호로 로그인하세요.')
+        website = bot.settings.web_url or bot.settings.public_url
+        if website:
+            await ctx.send('🌐 등장곡 관리: ' + website + '\n관리자 웹 비밀번호로 로그인하세요.')
         else:
             await ctx.send('웹 서버가 실행 중인 PC에서 `http://localhost:8080`으로 접속하세요. PORT를 변경했다면 그 포트를 사용하세요. 외부 공개 주소는 PUBLIC_URL에 설정하세요.')
 

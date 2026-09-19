@@ -11,12 +11,14 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 from aiohttp import web
-from config import ROOT
+from config import ROOT, normalize_origin
 from validation import EVENTS, clean_name, validate_song
 
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
 SESSION_TTL = 8 * 60 * 60
+CORS_METHODS = {'GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'}
+CORS_HEADERS = {'authorization', 'content-type', 'x-csrf-token', 'range'}
 
 
 def version(package: str) -> str:
@@ -58,11 +60,13 @@ class WebPanel:
         self.sessions: dict[str, dict] = {}
         self.attempts: dict[str, deque] = defaultdict(deque)
         self.runner = None
-        self.app = web.Application(middlewares=[self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
+        self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
         self.app.add_routes([
             web.get('/', self.index),
             web.get('/assets/{name}', self.static),
+            web.get('/{name:app\\.js|config\\.js|style\\.css}', self.static),
             web.get('/healthz', self.health),
+            web.get('/api/connection', self.connection),
             web.post('/api/login', self.login),
             web.get('/api/session', self.session),
             web.post('/api/logout', self.logout),
@@ -79,28 +83,77 @@ class WebPanel:
             web.get('/api/export', self.export),
         ])
 
+    def request_origin(self, request):
+        # Browsers omit Origin on same-origin GET, but include it on CORS requests.
+        return request.headers.get('Origin') or self.s.public_url or f'{request.scheme}://{request.host}'
+
+    def allowed_origins(self, request):
+        allowed = set(self.s.web_origins)
+        for value in (self.s.public_url, self.s.web_url, f'{request.scheme}://{request.host}'):
+            if value:
+                try:
+                    allowed.add(normalize_origin(value))
+                except ValueError:
+                    pass
+        return allowed
+
+    @web.middleware
+    async def cors(self, request, handler):
+        """CORS wraps security so authentication failures are readable by our UI."""
+        protected_path = request.path.startswith('/api/') or request.path == '/healthz'
+        origin = request.headers.get('Origin', '')
+        allowed = self.allowed_origins(request)
+        accepted = bool(origin and origin in allowed)
+        if protected_path and origin and not accepted:
+            resp = response({'error': '이 웹사이트 주소가 허용되지 않았습니다. Railway의 WEB_ORIGINS에 현재 Firebase 주소를 추가하고 재배포하세요.'}, 403)
+        elif protected_path and request.method == 'OPTIONS':
+            method = request.headers.get('Access-Control-Request-Method', '').upper()
+            headers = {h.strip().lower() for h in request.headers.get('Access-Control-Request-Headers', '').split(',') if h.strip()}
+            if not accepted or method not in CORS_METHODS or not headers.issubset(CORS_HEADERS):
+                resp = response({'error': '허용되지 않은 사전 요청입니다.'}, 403)
+            else:
+                resp = web.Response(status=204)
+                resp.headers['Access-Control-Allow-Methods'] = ', '.join(sorted(CORS_METHODS))
+                resp.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type, X-CSRF-Token, Range'
+                resp.headers['Access-Control-Max-Age'] = '600'
+        else:
+            resp = await handler(request)
+        if protected_path:
+            resp.headers['Vary'] = 'Origin'
+            resp.headers['Cache-Control'] = 'no-store'
+            resp.headers['X-Content-Type-Options'] = 'nosniff'
+            if accepted:
+                resp.headers['Access-Control-Allow-Origin'] = origin
+                resp.headers['Access-Control-Expose-Headers'] = 'Content-Disposition, Content-Range, Accept-Ranges'
+                # No cross-site cookies: browser clients use Authorization: Bearer.
+        return resp
+
     @web.middleware
     async def security(self, request, handler):
         try:
-            if request.path.startswith('/api/'):
+            if request.path.startswith('/api/') and request.path not in {'/api/login', '/api/connection'}:
+                authorization = request.headers.get('Authorization', '')
+                if authorization:
+                    parts = authorization.split()
+                    if len(parts) != 2 or parts[0].lower() != 'bearer':
+                        raise web.HTTPUnauthorized(text='로그인 토큰이 올바르지 않습니다.')
+                    key, mode = parts[1], 'bearer'
+                else:
+                    key, mode = request.cookies.get(COOKIE, ''), 'cookie'
+                sess = self.sessions.get(key)
+                if not sess or sess['expires'] < time.monotonic():
+                    self.sessions.pop(key, None)
+                    raise web.HTTPUnauthorized(text='로그인이 필요합니다. 다시 로그인하세요.')
+                if sess.get('mode', 'cookie') != mode:
+                    raise web.HTTPUnauthorized(text='로그인 방식이 맞지 않습니다. 다시 로그인하세요.')
+                # A browser token obtained by one website cannot be used by another origin.
+                if mode == 'bearer' and sess.get('origin') != self.request_origin(request):
+                    raise web.HTTPForbidden(text='로그인한 웹사이트에서 다시 시도하세요.')
+                request['session'], request['session_key'] = sess, key
                 if request.method not in {'GET', 'HEAD'}:
-                    origin = request.headers.get('Origin')
-                    allowed = {f'{request.scheme}://{request.host}'}
-                    if self.s.public_url:
-                        allowed.add(self.s.public_url)
-                    if origin and origin not in allowed:
-                        raise web.HTTPForbidden(text='다른 사이트에서 보낸 요청은 허용하지 않습니다.')
-                if request.path != '/api/login':
-                    key = request.cookies.get(COOKIE, '')
-                    sess = self.sessions.get(key)
-                    if not sess or sess['expires'] < time.monotonic():
-                        self.sessions.pop(key, None)
-                        raise web.HTTPUnauthorized(text='로그인이 필요합니다.')
-                    request['session'] = sess
-                    if request.method not in {'GET', 'HEAD'}:
-                        csrf = request.headers.get('X-CSRF-Token', '')
-                        if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
-                            raise web.HTTPForbidden(text='보안 토큰이 만료됐습니다. 새로고침 후 다시 시도하세요.')
+                    csrf = request.headers.get('X-CSRF-Token', '')
+                    if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
+                        raise web.HTTPForbidden(text='보안 토큰이 만료됐습니다. 새로고침 후 다시 시도하세요.')
             resp = await handler(request)
         except web.HTTPException as exc:
             resp = response({'error': exc.text if exc.status in {401, 403} else exc.reason}, exc.status)
@@ -125,12 +178,18 @@ class WebPanel:
 
     async def static(self, request):
         name = request.match_info['name']
-        if name not in {'app.js', 'style.css'}:
+        if name not in {'app.js', 'style.css', 'config.js'}:
             raise web.HTTPNotFound()
         return web.FileResponse(ROOT / 'static' / name)
 
     async def health(self, request):
         return response({'web': 'ok', 'discord': 'ready' if self.bot.is_ready() else 'offline'})
+
+    async def connection(self, request):
+        # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
+        return response({'service': 'appearance-song-bot', 'apiVersion': 2,
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'linked-20260919-1',
+                         'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only})
 
     async def login(self, request):
         if not self.s.web_password:
@@ -147,6 +206,9 @@ class WebPanel:
             return response({'error': '로그인 시도가 많습니다. 5분 뒤에 다시 시도하세요.'}, 429)
         window.append(now)
         data = await body(request)
+        mode = data.get('authMode', 'cookie')
+        if mode not in {'cookie', 'bearer'}:
+            raise ValueError('지원하지 않는 로그인 방식입니다.')
         supplied = str(data.get('password', ''))
         a = hashlib.sha256(supplied.encode()).digest()
         b = hashlib.sha256(self.s.web_password.encode()).digest()
@@ -161,16 +223,21 @@ class WebPanel:
         if old:
             self.sessions.pop(old, None)
         key, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
-        self.sessions[key] = {'expires': now + SESSION_TTL, 'csrf': csrf}
-        resp = response({'ok': True, 'csrf': csrf})
-        resp.set_cookie(COOKIE, key, httponly=True, secure=self.s.secure_cookie, samesite='Strict', max_age=SESSION_TTL, path='/')
+        self.sessions[key] = {'expires': now + SESSION_TTL, 'csrf': csrf,
+                              'mode': mode, 'origin': self.request_origin(request)}
+        if mode == 'bearer':
+            # Do not put tokens into a URL or depend on third-party cookie support.
+            resp = response({'ok': True, 'csrf': csrf, 'accessToken': key, 'expiresIn': SESSION_TTL})
+        else:
+            resp = response({'ok': True, 'csrf': csrf})
+            resp.set_cookie(COOKIE, key, httponly=True, secure=self.s.secure_cookie, samesite='Strict', max_age=SESSION_TTL, path='/')
         return resp
 
     async def session(self, request):
         return response({'csrf': request['session']['csrf']})
 
     async def logout(self, request):
-        self.sessions.pop(request.cookies.get(COOKIE, ''), None)
+        self.sessions.pop(request['session_key'], None)
         resp = response({'ok': True})
         resp.del_cookie(COOKIE, path='/')
         return resp
@@ -336,6 +403,9 @@ class WebPanel:
         return response({
             'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only,
             'storage': self.store.mode,
+            'apiVersion': 2, 'authMode': request['session'].get('mode', 'cookie'),
+            'publicUrl': self.s.public_url, 'webUrl': self.s.web_url,
+            'webOrigins': list(self.s.web_origins),
             'packages': {p: version(p) for p in ['discord.py', 'PyNaCl', 'davey', 'yt-dlp', 'yt-dlp-ejs', 'aiohttp', 'firebase-admin']},
             'ffmpeg': bool(shutil.which(self.s.ffmpeg)), 'ffprobe': bool(shutil.which(self.s.ffprobe)),
             'deno': bool(shutil.which('deno')),
@@ -343,6 +413,9 @@ class WebPanel:
             'secureCookie': self.s.secure_cookie, 'maxUploadMb': self.s.max_upload_mb,
             'maxStorageMb': self.s.max_storage_mb,
             'checks': [
+                'Firebase → Railway: static/config.js의 API_BASE_URL은 Railway 공개 HTTPS 주소',
+                'Railway WEB_ORIGINS에 현재 Firebase 웹사이트 주소를 정확히 등록',
+                '웹 로그인 세션은 서버 재시작 또는 8시간 후 만료됨: 다시 로그인',
                 'Discord Developer Portal → Bot → Message Content Intent 켜기 (!명령어용)',
                 '통화방 권한 덮어쓰기에서 채널 보기·연결·말하기 허용',
                 '서버 음소거 해제, 통화방 인원 제한 확인',
