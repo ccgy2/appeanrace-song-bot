@@ -114,6 +114,21 @@ class AppearanceBot(commands.Bot):
             msg = '처리 중 오류가 발생했습니다. 웹 진단 탭 또는 서버 로그를 확인하세요.'
         await notify(ctx.channel, '❌ ' + msg)
 
+    async def notification_channel(self, guild, fallback=None):
+        """저장된 봇 출력 채널을 반환하고, 사용할 수 없으면 안전한 기본 채널을 사용합니다."""
+        channel_id = await self.store.get_notification_channel(guild.id)
+        if channel_id:
+            channel = guild.get_channel(channel_id)
+            if channel is not None and guild.me is not None:
+                try:
+                    perms = channel.permissions_for(guild.me)
+                    if perms.view_channel and perms.send_messages and perms.embed_links:
+                        return channel
+                except AttributeError:
+                    pass
+            log.warning('지정된 알림 채널(%s)을 사용할 수 없어 자동 채널을 사용합니다.', channel_id)
+        return fallback if fallback is not None else text_channel(guild)
+
     async def now_embed(self, guild, channel, team: str):
         playing = self.player.now.get(guild.id, {})
         state = await self.store.state(team)
@@ -122,6 +137,7 @@ class AppearanceBot(commands.Bot):
         embed.add_field(name='팀', value=team)
         embed.add_field(name='볼륨', value=f'{round(state["volume"] * 100)}%')
         embed.add_field(name='타순', value=str(state['currentOrder']))
+        channel = await self.notification_channel(guild, channel)
         if channel is None:
             return
         old = self.now_messages.get(guild.id)
@@ -185,12 +201,12 @@ class AppearanceBot(commands.Bot):
             vc = guild.voice_client
             if not vc or not vc.channel or any(not m.bot for m in vc.channel.members):
                 return
-            await notify(text_channel(guild), f'⏱ 통화방에 사람이 없어 {min(30, wait)}초 후 퇴장합니다.')
+            await notify(await self.notification_channel(guild), f'⏱ 통화방에 사람이 없어 {min(30, wait)}초 후 퇴장합니다.')
             await asyncio.sleep(min(30, wait))
             vc = guild.voice_client
             if vc and vc.channel and not any(not m.bot for m in vc.channel.members):
                 await self.player.leave(guild)
-                await notify(text_channel(guild), '🔇 빈 통화방에서 자동 퇴장했습니다.')
+                await notify(await self.notification_channel(guild), '🔇 빈 통화방에서 자동 퇴장했습니다.')
         finally:
             if self.idle_tasks.get(guild.id) is asyncio.current_task():
                 self.idle_tasks.pop(guild.id, None)
@@ -210,7 +226,7 @@ class AppearanceBot(commands.Bot):
         self.join_cooldowns[key] = now
         if len(self.join_cooldowns) > 10000:
             self.join_cooldowns = {k: t for k, t in self.join_cooldowns.items() if now - t < 60}
-        channel = text_channel(guild)
+        channel = await self.notification_channel(guild)
         try:
             # 현재 팀을 먼저 찾되, 예전처럼 다른 팀에 등록된 사용자 ID도 이어서 찾는다.
             current = await self.store.get_team(guild.id)
@@ -301,11 +317,58 @@ def install_commands(bot: AppearanceBot):
     def manager():
         return commands.check(lambda ctx: can_manage(ctx.author, bot.settings))
 
+    def admin_only():
+        return commands.check(lambda ctx: bool(
+            ctx.author and (
+                ctx.author.id == bot.settings.owner_id
+                or getattr(ctx.author, 'guild_permissions', discord.Permissions.none()).administrator
+            )
+        ))
+
     @bot.check
     async def server_only(ctx):
         if ctx.guild is None:
             raise commands.NoPrivateMessage()
         return True
+
+    @bot.command(name='알림채널설정', aliases=['출력채널설정', '로그채널설정'])
+    @admin_only()
+    async def set_notification_channel(ctx, channel: discord.TextChannel = None):
+        target = channel or ctx.channel
+        if not isinstance(target, discord.TextChannel):
+            raise ValueError('일반 텍스트 채널에서 실행하거나 `!알림채널설정 #채널`로 지정하세요.')
+        if ctx.guild.me is None:
+            raise ValueError('봇의 서버 멤버 정보를 확인할 수 없습니다.')
+        perms = target.permissions_for(ctx.guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.embed_links):
+            raise ValueError('지정할 채널에서 봇에게 채널 보기, 메시지 보내기, 링크 임베드 권한이 필요합니다.')
+        await bot.store.set_notification_channel(ctx.guild.id, target.id)
+        old = bot.now_messages.pop(ctx.guild.id, None)
+        if old and old.channel.id != target.id:
+            try:
+                await old.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        await ctx.send(f'✅ 등장곡 봇 알림 채널을 {target.mention} 로 지정했습니다. 재시작/재배포 후에도 유지됩니다.')
+
+    @bot.command(name='알림채널')
+    async def show_notification_channel(ctx):
+        channel_id = await bot.store.get_notification_channel(ctx.guild.id)
+        if channel_id:
+            channel = ctx.guild.get_channel(channel_id)
+            if channel is not None:
+                await ctx.send(f'📢 현재 등장곡 봇 알림 채널: {channel.mention}')
+                return
+            await ctx.send(f'⚠️ 저장된 알림 채널(ID: {channel_id})을 찾을 수 없습니다. `!알림채널설정`으로 다시 지정하세요.')
+            return
+        await ctx.send('📢 별도 알림 채널이 없습니다. 현재는 봇이 메시지를 보낼 수 있는 텍스트 채널을 자동 선택합니다.')
+
+    @bot.command(name='알림채널해제', aliases=['출력채널해제'])
+    @admin_only()
+    async def clear_notification_channel(ctx):
+        await bot.store.set_notification_channel(ctx.guild.id, None)
+        bot.now_messages.pop(ctx.guild.id, None)
+        await ctx.send('✅ 알림 채널 지정을 해제했습니다. 이제 메시지를 보낼 수 있는 채널을 자동 선택합니다.')
 
     @bot.command(name='입장')
     async def join(ctx):

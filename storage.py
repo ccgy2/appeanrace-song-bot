@@ -129,6 +129,19 @@ class Store:
         await self.create_team(team)
         await self._run(self._write, f'guilds/{guild_id}', {'team': team}, True)
 
+    async def get_notification_channel(self, guild_id: int) -> int | None:
+        d = await self._run(self._read, f'guilds/{guild_id}')
+        value = (d or {}).get('notificationChannelId')
+        try:
+            return int(value) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    async def set_notification_channel(self, guild_id: int, channel_id: int | None):
+        # 같은 guild 문서에 merge하여 현재 팀 설정을 보존한다. None은 '자동 선택'을 뜻한다.
+        value = int(channel_id) if channel_id else None
+        await self._run(self._write, f'guilds/{guild_id}', {'notificationChannelId': value}, True)
+
     async def songs(self, team: str, category: str = 'entrance') -> list[dict]:
         category = song_category(category)
         rows = await self._run(self._list, f'teams/{clean_name(team)}/{SONG_COLLECTIONS[category]}')
@@ -153,10 +166,36 @@ class Store:
                     writes.append((f'{root}/lineup/{row["id"]}', data if new else None))
         if category == 'situation':
             for row in self._list(f'{root}/events'):
+                data = {k: v for k, v in row.items() if k != 'id'}
+                changed = False
                 if row.get('songName') == old and row.get('category') == 'situation':
-                    data = {k: v for k, v in row.items() if k != 'id'}
-                    data['songName'] = new
-                    writes.append((f'{root}/events/{row["id"]}', data if new else None))
+                    if new:
+                        data['songName'] = new
+                    else:
+                        data.pop('songName', None)
+                        data.pop('category', None)
+                    changed = True
+                tracks = row.get('tracks')
+                if isinstance(tracks, list):
+                    next_tracks = []
+                    for track in tracks:
+                        if not isinstance(track, dict):
+                            continue
+                        item = dict(track)
+                        if item.get('type') == 'song' and item.get('songName') == old:
+                            changed = True
+                            if not new:
+                                continue
+                            item['songName'] = new
+                        next_tracks.append(item)
+                    if changed:
+                        data['tracks'] = next_tracks
+                if changed:
+                    has_source = bool(data.get('songName') or data.get('assetId') or data.get('file') or data.get('tracks'))
+                    if not has_source and not data.get('isCustom'):
+                        writes.append((f'{root}/events/{row["id"]}', None))
+                    else:
+                        writes.append((f'{root}/events/{row["id"]}', data))
         return writes
 
     async def save_song(self, team: str, song: dict, *, old_name: str | None = None):

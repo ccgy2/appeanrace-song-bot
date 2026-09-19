@@ -357,6 +357,56 @@ class WebPanel:
             'maxUploadMb': self.s.max_upload_mb,
         })
 
+    def _event_tracks(self, doc: dict | None) -> list[dict]:
+        """Normalize new multi-track docs and old single-source docs."""
+        if not doc:
+            return []
+        raw = doc.get('tracks')
+        if isinstance(raw, list):
+            tracks = []
+            for item in raw[:30]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get('type') == 'song' and item.get('songName'):
+                    tracks.append({'type': 'song', 'songName': str(item['songName'])})
+                elif item.get('type') == 'asset' and item.get('assetId'):
+                    tracks.append({'type': 'asset', 'assetId': str(item['assetId']),
+                                   'filename': str(item.get('filename') or '업로드 오디오')})
+            return tracks
+        if doc.get('songName') and doc.get('category') == 'situation':
+            return [{'type': 'song', 'songName': str(doc['songName'])}]
+        if doc.get('assetId'):
+            return [{'type': 'asset', 'assetId': str(doc['assetId']),
+                     'filename': str(doc.get('filename') or '업로드 오디오')}]
+        return []
+
+    async def _validated_event_tracks(self, team: str, value) -> list[dict]:
+        if not isinstance(value, list):
+            raise ValueError('경기 상황 곡 목록이 올바르지 않습니다.')
+        if len(value) > 30:
+            raise ValueError('한 경기 상황에는 최대 30곡까지 넣을 수 있습니다.')
+        result, seen = [], set()
+        for raw in value:
+            if not isinstance(raw, dict):
+                raise ValueError('경기 상황 곡 정보가 올바르지 않습니다.')
+            kind = str(raw.get('type', ''))
+            if kind == 'song':
+                name = clean_name(raw.get('songName'), '상황별 노래 이름')
+                if not await self.store.song(team, name, 'situation'):
+                    raise ValueError(f'상황별 노래 라이브러리에 “{name}”을 먼저 등록하세요.')
+                ident = ('song', name)
+                item = {'type': 'song', 'songName': name}
+            elif kind == 'asset':
+                meta = self.assets.get(str(raw.get('assetId', '')))
+                ident = ('asset', meta['id'])
+                item = {'type': 'asset', 'assetId': meta['id'], 'filename': meta['name']}
+            else:
+                raise ValueError('경기 상황에는 상황별 노래 또는 업로드 오디오만 넣을 수 있습니다.')
+            if ident in seen:
+                continue
+            seen.add(ident); result.append(item)
+        return result
+
     def _event_rows(self, events: dict[str, dict]) -> list[dict]:
         rows = []
         for key, label in EVENTS.items():
@@ -364,6 +414,9 @@ class WebPanel:
             source = None
             if doc:
                 source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
+                if source is not None:
+                    source['tracks'] = self._event_tracks(doc)
+                    source['playMode'] = str(doc.get('playMode') or 'single')
             rows.append({'key': key, 'label': label, 'custom': source,
                          'customEvent': False, 'bundledCount': len(self.assets.bundled(key))})
         extras = []
@@ -372,6 +425,9 @@ class WebPanel:
                 continue
             label = str(doc.get('label') or key)
             source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
+            if source is not None:
+                source['tracks'] = self._event_tracks(doc)
+                source['playMode'] = str(doc.get('playMode') or 'single')
             extras.append({'key': key, 'label': label, 'custom': source,
                            'customEvent': True, 'bundledCount': 0})
         extras.sort(key=lambda row: row['label'].casefold())
@@ -392,8 +448,11 @@ class WebPanel:
                 break
         else:
             raise RuntimeError('경기 상황 ID를 만들지 못했습니다.')
-        await self.store.set_event(team, key, {'label': label, 'isCustom': True})
-        return response({'ok': True, 'key': key, 'label': label}, 201)
+        mode = str(data.get('playMode') or 'single')
+        if mode not in {'single', 'random', 'sequence'}:
+            raise ValueError('재생 방식이 올바르지 않습니다.')
+        await self.store.set_event(team, key, {'label': label, 'isCustom': True, 'playMode': mode, 'tracks': []})
+        return response({'ok': True, 'key': key, 'label': label, 'playMode': mode}, 201)
 
     async def delete_event(self, request):
         team = clean_name(request.query.get('team'), '팀 이름')
@@ -500,21 +559,40 @@ class WebPanel:
                     raise ValueError('같은 이름의 기본 경기 상황이 이미 있습니다.')
                 base['label'] = label
 
+        previous_source = ({k: v for k, v in (current or {}).items() if k not in {'id', 'label', 'isCustom'}})
+
+        # New multi-track API. Saving the list also migrates old songName/assetId records.
+        if 'tracks' in data or 'playMode' in data:
+            mode = str(data.get('playMode') or previous_source.get('playMode') or 'single')
+            if mode not in {'single', 'random', 'sequence'}:
+                raise ValueError('재생 방식은 단곡, 랜덤, 여러곡 순차 중에서 선택하세요.')
+            tracks = (await self._validated_event_tracks(team, data['tracks'])
+                      if 'tracks' in data else self._event_tracks(current))
+            if not tracks and not custom_event:
+                # Built-in situation with an empty list means restore bundled default sounds.
+                await self.store.set_event(team, key, None)
+            else:
+                await self.store.set_event(team, key, {**base, 'playMode': mode, 'tracks': tracks})
+            return response({'ok': True, 'playMode': mode, 'trackCount': len(tracks)})
+
+        # Backward compatibility with the previous website/API.
         asset = data.get('assetId')
-        previous_source = ({k: v for k, v in current.items() if k not in {'id', 'label', 'isCustom'}} if custom_event else {})
         if data.get('songName'):
             name = clean_name(data['songName'])
             if not await self.store.song(team, name, 'situation'):
                 raise ValueError('상황별 노래 라이브러리에 먼저 곡을 등록하세요.')
-            await self.store.set_event(team, key, {**base, 'songName': name, 'category': 'situation'})
+            await self.store.set_event(team, key, {**base, 'playMode': 'single',
+                                                    'tracks': [{'type': 'song', 'songName': name}],
+                                                    'songName': name, 'category': 'situation'})
         elif asset:
             meta = self.assets.get(str(asset))
-            await self.store.set_event(team, key, {**base, 'assetId': meta['id'], 'filename': meta['name']})
+            await self.store.set_event(team, key, {**base, 'playMode': 'single',
+                                                    'tracks': [{'type': 'asset', 'assetId': meta['id'], 'filename': meta['name']}],
+                                                    'assetId': meta['id'], 'filename': meta['name']})
         elif custom_event and 'label' in data and 'assetId' not in data and 'songName' not in data:
-            # 이름만 바꿀 때는 기존 사운드 연결을 그대로 유지한다.
+            # Rename only: preserve every connected track and playback mode.
             await self.store.set_event(team, key, {**base, **previous_source})
         elif custom_event:
-            # 직접 만든 상황은 연결만 해제하고 상황 이름 자체는 남긴다.
             await self.store.set_event(team, key, base)
         else:
             await self.store.set_event(team, key, None)

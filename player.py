@@ -27,6 +27,7 @@ class Player:
         self.now: dict[int, dict] = {}
         self.extract_slots = asyncio.Semaphore(2)
         self.extract_tasks: set[asyncio.Task] = set()
+        self.event_sequence = defaultdict(int)
         self.cookie_path = self._cookies()
 
     def _cookies(self) -> str | None:
@@ -161,26 +162,52 @@ class Player:
             raise
         self.now[guild.id] = {'title': title, 'team': team, 'status': 'playing'}
 
+    def _event_tracks(self, custom: dict | None) -> list[dict]:
+        if not custom:
+            return []
+        if isinstance(custom.get('tracks'), list):
+            return [dict(x) for x in custom['tracks'] if isinstance(x, dict)][:30]
+        if custom.get('songName') and custom.get('category') == 'situation':
+            return [{'type': 'song', 'songName': custom['songName']}]
+        if custom.get('assetId'):
+            return [{'type': 'asset', 'assetId': custom['assetId'], 'filename': custom.get('filename')}]
+        return []
+
     async def event(self, guild, team: str, key: str, channel=None):
-        self.generation[guild.id] += 1
-        generation = self.generation[guild.id]
         custom = await self.store.event(team, key)
-        if custom and custom.get('songName') and custom.get('category') == 'situation':
-            song = await self.store.song(team, custom['songName'], 'situation')
-            if not song:
-                raise ValueError('연결된 상황별 노래가 없습니다. 경기 사운드에서 다시 선택하세요.')
-            if generation != self.generation[guild.id]:
-                return False
-            return await self.play(guild, team, song, channel=channel)
-        if custom and custom.get('assetId'):
-            path = self.assets.get(custom['assetId'])['path']
+        tracks = self._event_tracks(custom)
+        if tracks:
+            mode = str((custom or {}).get('playMode') or 'single')
+            if mode == 'random':
+                track = random.choice(tracks)
+            elif mode == 'sequence':
+                seq_key = (str(team), str(key))
+                index = self.event_sequence[seq_key] % len(tracks)
+                self.event_sequence[seq_key] += 1
+                track = tracks[index]
+            else:
+                track = tracks[0]
+
+            if track.get('type') == 'song':
+                song = await self.store.song(team, str(track.get('songName', '')), 'situation')
+                if not song:
+                    raise ValueError('연결된 상황별 노래가 없습니다. 경기 사운드에서 목록을 다시 저장하세요.')
+                return await self.play(guild, team, song, channel=channel)
+            if track.get('type') == 'asset':
+                path = self.assets.get(str(track.get('assetId', '')))['path']
+            else:
+                raise ValueError('경기 상황에 연결된 오디오 정보가 올바르지 않습니다.')
         elif custom and custom.get('file'):
+            # Legacy file-name based setting.
             path = self.assets.legacy_file(key, custom['file'])
         else:
             files = self.assets.bundled(key)
             if not files:
-                raise ValueError('효과음 파일이 없습니다. 웹에서 오디오를 등록하세요.')
+                raise ValueError('효과음 파일이 없습니다. 웹에서 상황별 노래나 오디오를 등록하세요.')
             path = random.choice(files)
+
+        self.generation[guild.id] += 1
+        generation = self.generation[guild.id]
         if generation != self.generation[guild.id]:
             return False
         vc = await self.voice.connect(guild, channel)
