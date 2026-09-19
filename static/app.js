@@ -304,7 +304,7 @@ function drawLive(s) {
   $('#sidebar-dot').classList.toggle('online', s.ready);
   $('#sidebar-status').textContent = s.ready ? `${s.botLabel || '선택한 봇'} 연결됨` : `${s.botLabel || '선택한 봇'} 미연결`;
   if ($('#voice-bot-label')) $('#voice-bot-label').textContent = s.botLabel || (selectedBot==='secondary'?'백팀 봇':'청팀 봇');
-  $('#voice-title').textContent = voice?.connected ? `${voice.channelName} 연결됨` : '통화방 연결';
+  const voiceTitle = $('#voice-title'); if (voiceTitle) voiceTitle.textContent = voice?.connected ? `${voice.channelName} 연결됨` : '통화방 연결';
   $('#voice-detail').textContent = voice?.connected ? (voice.serverMuted ? '서버 음소거를 해제해주세요.' : `음성 연결 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
   $('#voice-error').hidden = !voice?.error; $('#voice-error').textContent = voice?.error || '';
   $('#playing-title').textContent = s.nowPlaying?.title || '재생 대기 중';
