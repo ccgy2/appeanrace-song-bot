@@ -15,12 +15,13 @@ from config import Settings
 from validation import clean_name, song_category, SONG_COLLECTIONS, SONG_CATEGORIES
 
 log = logging.getLogger(__name__)
+LOCAL_SQLITE_LOCK = threading.RLock()
 
 
 class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.lock = threading.RLock()
+        self.lock = LOCAL_SQLITE_LOCK if not settings.firebase_key else threading.RLock()
         self.db = None
         self.sql = None
         if settings.firebase_key:
@@ -42,12 +43,14 @@ class Store:
             self.mode = 'firebase'
         else:
             settings.data_dir.mkdir(parents=True, exist_ok=True)
-            self.sql = sqlite3.connect(settings.data_dir / 'songs.sqlite3', check_same_thread=False)
+            self.sql = sqlite3.connect(settings.data_dir / 'songs.sqlite3', check_same_thread=False, timeout=30)
             self.sql.execute('PRAGMA journal_mode=WAL')
+            self.sql.execute('PRAGMA busy_timeout=30000')
+            self.sql.execute('PRAGMA synchronous=NORMAL')
             self.sql.execute('CREATE TABLE IF NOT EXISTS docs (path TEXT PRIMARY KEY, body TEXT NOT NULL)')
             self.sql.commit()
             self.mode = 'local'
-            log.warning('Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.')
+            log.info('데이터 저장소: Railway Volume의 SQLite 사용 (%s)', settings.data_dir / 'songs.sqlite3')
 
     def _read(self, path: str) -> dict | None:
         if self.db is not None:
@@ -132,20 +135,57 @@ class Store:
         default_team = '백팀' if secondary else '청팀'
         return (d or {}).get(key, default_team)
 
+    def _merge_team_missing_records(self, source: str, target: str) -> int:
+        """source의 기존 팀 데이터를 target으로 *복사*한다.
+
+        이미 target에 같은 키가 있으면 절대 덮어쓰지 않는다. 원본도 삭제하지 않는다.
+        2026-09-19 청백전 V2에서 A팀 선택을 청팀으로 바꾸며 기존 데이터가
+        사라진 것처럼 보였던 문제를 안전하게 복구하기 위한 일회성 호환 처리다.
+        """
+        source, target = clean_name(source), clean_name(target)
+        writes: list[tuple[str, dict | None]] = []
+        collections = [*SONG_COLLECTIONS.values(), 'lineup', 'state', 'events']
+        for collection in collections:
+            for row in self._list(f'teams/{source}/{collection}'):
+                doc_id = row.get('id')
+                if not doc_id:
+                    continue
+                target_path = f'teams/{target}/{collection}/{doc_id}'
+                if self._read(target_path) is not None:
+                    continue
+                body = {k: v for k, v in row.items() if k != 'id'}
+                writes.append((target_path, body))
+        if writes:
+            self._apply(writes)
+        return len(writes)
+
     async def ensure_dual_team_defaults(self, guild_id: int):
-        """2봇 모드를 처음 켠 서버만 청팀/백팀 기본값으로 안전하게 초기화한다."""
+        """청백전 기본 팀을 준비하고, 구버전 A팀 데이터는 비파괴 방식으로 청팀에 합친다."""
         path = f'guilds/{guild_id}'
         d = await self._run(self._read, path) or {}
-        if d.get('dualTeamDefaultsV2'):
-            return
+
         await self.create_team('청팀')
         await self.create_team('백팀')
-        body = {'dualTeamDefaultsV2': True}
-        if not d.get('team') or d.get('team') == 'A팀':
-            body['team'] = '청팀'
-        if not d.get('teamSecondary') or d.get('teamSecondary') == 'A팀':
-            body['teamSecondary'] = '백팀'
-        await self._run(self._write, path, body, True)
+
+        body = {}
+        if not d.get('dualTeamDefaultsV2'):
+            body['dualTeamDefaultsV2'] = True
+            if not d.get('team') or d.get('team') == 'A팀':
+                body['team'] = '청팀'
+            if not d.get('teamSecondary') or d.get('teamSecondary') == 'A팀':
+                body['teamSecondary'] = '백팀'
+
+        # V2를 이미 적용한 서버도 여기까지 온다.
+        # A팀의 기존 곡/응원가/상황곡/타순/상황 사운드/볼륨을 청팀으로 합치되
+        # 청팀에 새로 만든 같은 이름의 데이터는 보존하고 A팀 원본도 그대로 둔다.
+        if not d.get('legacyATeamMergedIntoBlueV3'):
+            copied = await self._run(self._merge_team_missing_records, 'A팀', '청팀')
+            body['legacyATeamMergedIntoBlueV3'] = True
+            if copied:
+                log.warning('기존 A팀 데이터 %s개를 청팀에 비파괴 복사했습니다. A팀 원본은 유지됩니다.', copied)
+
+        if body:
+            await self._run(self._write, path, body, True)
 
     async def set_team(self, guild_id: int, team: str, slot: str = 'primary'):
         await self.create_team(team)

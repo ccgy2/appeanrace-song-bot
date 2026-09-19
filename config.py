@@ -56,8 +56,8 @@ def load_deployment_link() -> dict:
             raise ValueError('web_origins must be a list of exact origins')
         allowed = tuple(dict.fromkeys([front, *(normalize_origin(x) for x in extra)]))
         if (not api.startswith('https://') or not front.startswith('https://')
-                or api == front or any(not x.startswith('https://') for x in allowed)):
-            raise ValueError('linked deployment requires distinct public HTTPS addresses')
+                or any(not x.startswith('https://') for x in allowed)):
+            raise ValueError('linked deployment requires public HTTPS addresses')
     except (ValueError, KeyError, TypeError, OSError) as exc:
         raise ValueError('deployment-link.json의 공개 주소 설정을 확인하세요.') from exc
     return {'api_url': api, 'web_url': front, 'web_origins': allowed}
@@ -72,6 +72,7 @@ class Settings:
     token: str = ''
     secondary_token: str = ''
     firebase_key: str = ''
+    storage_backend: str = 'sqlite'
     owner_id: int = 0
     data_dir: Path = ROOT / 'data'
     host: str = '0.0.0.0'
@@ -126,11 +127,22 @@ class Settings:
         on_railway = bool(volume_raw or any(os.getenv(k) for k in (
             'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_PUBLIC_DOMAIN')))
 
+        backend = os.getenv('STORAGE_BACKEND', 'sqlite').strip().lower() or 'sqlite'
+        if backend not in {'sqlite', 'firebase'}:
+            raise ValueError('STORAGE_BACKEND는 sqlite 또는 firebase만 사용할 수 있습니다.')
+        raw_firebase_key = os.getenv('FIREBASE_SERVICE_ACCOUNT', '').strip()
+        firebase_key = raw_firebase_key if backend == 'firebase' else ''
+        if backend == 'sqlite' and raw_firebase_key:
+            logging.getLogger(__name__).info('STORAGE_BACKEND=sqlite: 기존 FIREBASE_SERVICE_ACCOUNT는 런타임에서 사용하지 않습니다.')
+        if backend == 'firebase' and not firebase_key:
+            raise ValueError('STORAGE_BACKEND=firebase를 쓰려면 FIREBASE_SERVICE_ACCOUNT가 필요합니다.')
+
         s = cls(
             token=os.getenv('DISCORD_TOKEN', '').strip(),
             secondary_token=(os.getenv('DISCORD_TOKEN_SECONDARY', '').strip()
                              or os.getenv('DISCORD_TOKEN_2', '').strip()),
-            firebase_key=os.getenv('FIREBASE_SERVICE_ACCOUNT', '').strip(),
+            firebase_key=firebase_key,
+            storage_backend=backend,
             owner_id=int(os.getenv('OWNER_ID', '0') or 0),
             data_dir=data_dir,
             on_railway=on_railway,

@@ -1,7 +1,8 @@
 {
   "api_url": "https://appeanrace-song-bot-production.up.railway.app",
-  "web_url": "https://appearance-song.web.app",
+  "web_url": "https://appeanrace-song-bot-production.up.railway.app",
   "web_origins": [
+    "https://appeanrace-song-bot-production.up.railway.app",
     "https://appearance-song.web.app",
     "https://appearance-song.firebaseapp.com"
   ]

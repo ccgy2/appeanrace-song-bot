@@ -647,6 +647,10 @@ def create_bot(settings: Settings, *, slot: str = 'primary', label: str | None =
 
 async def run():
     settings = Settings.from_env()
+    # Runtime DB is SQLite. Optional legacy Firestore recovery is a one-time, non-fatal import.
+    if __import__('os').getenv('MIGRATE_FIRESTORE_ONCE', '').strip().lower() in {'1','true','yes','on'}:
+        from legacy_migration import migrate_firestore_once
+        await asyncio.to_thread(migrate_firestore_once, settings.data_dir)
     primary = create_bot(
         settings, slot='primary', label=settings.primary_bot_label,
         command_prefix='!', web_owner=True,

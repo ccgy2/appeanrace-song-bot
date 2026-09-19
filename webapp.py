@@ -293,9 +293,9 @@ class WebPanel:
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
         bots = self.bot_targets()
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
-                         'authMode': 'bearer', 'web': 'ok', 'build': 'library-20260919-1',
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'railway-sqlite-20260919-1',
                          'capabilities': ['library-categories', 'atomic-rename', 'storage-check',
-                                          'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels'],
+                                          'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
                              x['id'] == 'secondary' and x['ready'] for x in bots),
                          'bots': bots, 'webOnly': self.s.web_only})
@@ -788,15 +788,15 @@ class WebPanel:
             'apiVersion': 2, 'authMode': request['session'].get('mode', 'cookie'),
             'publicUrl': self.s.public_url, 'webUrl': self.s.web_url,
             'webOrigins': list(self.s.web_origins),
-            'packages': {p: version(p) for p in ['discord.py', 'PyNaCl', 'davey', 'yt-dlp', 'yt-dlp-ejs', 'aiohttp', 'firebase-admin']},
+            'packages': {p: version(p) for p in ['discord.py', 'PyNaCl', 'davey', 'yt-dlp', 'yt-dlp-ejs', 'aiohttp']},
             'ffmpeg': bool(shutil.which(self.s.ffmpeg)), 'ffprobe': bool(shutil.which(self.s.ffprobe)),
             'deno': bool(shutil.which('deno')),
             'cookiesConfigured': bool(self.s.cookies_path or self.s.cookies_b64),
             'secureCookie': self.s.secure_cookie, 'maxUploadMb': self.s.max_upload_mb,
             'maxStorageMb': self.s.max_storage_mb,
             'checks': [
-                'Firebase → Railway: static/config.js의 API_BASE_URL은 Railway 공개 HTTPS 주소',
-                'Railway WEB_ORIGINS에 현재 Firebase 웹사이트 주소를 정확히 등록',
+                '웹과 API는 같은 Railway 서비스에서 실행됨',
+                '데이터베이스는 DATA_DIR/songs.sqlite3이며 Railway Volume 안에 저장',
                 '웹 로그인 세션은 서버 재시작 또는 8시간 후 만료됨: 다시 로그인',
                 'Discord Developer Portal → Bot → Message Content Intent 켜기 (!명령어용)',
                 '통화방 권한 덮어쓰기에서 채널 보기·연결·말하기 허용',
