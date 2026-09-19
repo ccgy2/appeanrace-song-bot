@@ -86,6 +86,10 @@ class WebPanel:
         self.runner = None
         self.backup_lock = asyncio.Lock()
         self.account_lock = asyncio.Lock()
+        # Firestore free-tier 보호: /api/state의 DB-backed 부분을 짧게 캐시합니다.
+        # 실시간 음성 상태는 /api/live에서 별도로 갱신하므로 이 캐시는 음악/타순/상황 목록에만 영향합니다.
+        self.state_cache: dict[tuple[str, str, str], dict] = {}
+        self.state_cache_ttl = 300.0
         self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
         self.app.add_routes([
             web.get('/', self.index),
@@ -101,6 +105,7 @@ class WebPanel:
             web.get('/api/session', self.session),
             web.post('/api/logout', self.logout),
             web.get('/api/state', self.state),
+            web.get('/api/live', self.live),
             web.post('/api/team', self.team),
             web.post('/api/songs', self.save_song),
             web.delete('/api/songs', self.delete_song),
@@ -200,15 +205,26 @@ class WebPanel:
                     if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
                         raise web.HTTPForbidden(text='보안 토큰이 만료됐습니다. 새로고침 후 다시 시도하세요.')
             resp = await handler(request)
+            if request.path.startswith('/api/') and request.method not in {'GET', 'HEAD', 'OPTIONS'} and getattr(resp, 'status', 200) < 400:
+                # 웹에서 저장/수정/삭제/재생 제어를 한 직후에는 오래된 DB 캐시를 쓰지 않는다.
+                self.state_cache.clear()
         except web.HTTPException as exc:
             resp = response({'error': exc.text if exc.status in {401, 403} else exc.reason}, exc.status)
         except (ValueError, KeyError, TypeError) as exc:
             resp = response({'error': str(exc)[:400]}, 400)
         except Exception as exc:
-            # 토큰/쿠키/Firebase 키/yt-dlp 인증 헤더를 브라우저에 노출하지 않는다.
-            log.exception('웹 요청 실패: %s %s', request.method, request.path)
-            from_runtime = type(exc).__name__ == 'VoiceError'
-            resp = response({'error': str(exc)[:400] if from_runtime else '처리하지 못했습니다. 서버 로그와 진단 탭을 확인하세요.'}, 503)
+            # Firestore 무료 할당량 소진은 웹/봇 프로세스 장애가 아니다. 사용자에게 원인을 명확히 표시한다.
+            message = str(exc)
+            quota_error = ('Quota exceeded' in message or 'RESOURCE_EXHAUSTED' in message
+                           or type(exc).__name__ in {'ResourceExhausted', 'RetryError'})
+            if quota_error:
+                log.warning('Firestore quota exceeded: %s %s', request.method, request.path)
+                resp = response({'error': 'Firebase Firestore 읽기 할당량을 초과했습니다. 할당량이 갱신된 뒤 다시 시도하세요. 최신 패치는 실시간 화면 갱신에서 Firestore를 반복 조회하지 않습니다.'}, 429)
+            else:
+                # 토큰/쿠키/Firebase 키/yt-dlp 인증 헤더를 브라우저에 노출하지 않는다.
+                log.exception('웹 요청 실패: %s %s', request.method, request.path)
+                from_runtime = type(exc).__name__ == 'VoiceError'
+                resp = response({'error': str(exc)[:400] if from_runtime else '처리하지 못했습니다. 서버 로그와 진단 탭을 확인하세요.'}, 503)
         resp.headers.update({
             'X-Content-Type-Options': 'nosniff',
             'X-Frame-Options': 'DENY',
@@ -363,32 +379,7 @@ class WebPanel:
             raise ValueError(f'{self.bot_label(bot)}이 들어가 있는 Discord 서버를 선택하세요.')
         return guild
 
-    async def state(self, request):
-        target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
-        target_bot = self.target_bot(target)
-        teams = await self.store.teams()
-        guilds = [{'id': str(g.id), 'name': g.name} for g in target_bot.guilds]
-        guild_id = request.query.get('guild_id')
-        guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
-        active = await self.store.get_team(guild.id, target) if guild else 'A팀'
-        team = clean_name(request.query.get('team') or active, '팀 이름')
-        if team not in teams:
-            teams.append(team)
-        state = await self.store.state(team)
-        events = {e['id']: e for e in await self.store.events(team)}
-        library = await self.store.library(team)
-        for songs in library.values():
-            for song in songs:
-                if song.get('assetId'):
-                    try:
-                        meta = await asyncio.to_thread(self.assets.get, song['assetId'])
-                        song['filename'] = meta['name']
-                        song['fileDuration'] = meta['duration']
-                    except (ValueError, OSError):
-                        # Preserve the record and ID. Never hide/delete a missing audio row.
-                        song['fileMissing'] = True
-        songs = library['entrance']
-        channels = []
+    def _live_payload(self, target_bot, guild, target: str) -> dict:
         peer_voice_id = None
         peer_voice_name = None
         peer_label = None
@@ -401,6 +392,83 @@ class WebPanel:
                     peer_voice_id = str(peer_vc.channel.id)
                     peer_voice_name = peer_vc.channel.name
                     peer_label = self.bot_label(peer)
+        return {
+            'ready': target_bot.is_ready(),
+            'botTarget': target,
+            'botLabel': self.bot_label(target_bot),
+            'botTargets': self.bot_targets(),
+            'guildId': str(guild.id) if guild else None,
+            'voice': target_bot.player.voice.status(guild) if guild else None,
+            'otherBotVoice': ({'channelId': peer_voice_id, 'channelName': peer_voice_name, 'botLabel': peer_label}
+                              if peer_voice_id else None),
+            'nowPlaying': target_bot.player.now.get(guild.id) if guild else None,
+        }
+
+    async def live(self, request):
+        """Discord 실시간 상태 전용. Firestore를 전혀 읽지 않는다."""
+        target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
+        target_bot = self.target_bot(target)
+        guild_id = request.query.get('guild_id')
+        guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
+        return response(self._live_payload(target_bot, guild, target))
+
+    async def state(self, request):
+        target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
+        target_bot = self.target_bot(target)
+        guilds = [{'id': str(g.id), 'name': g.name} for g in target_bot.guilds]
+        guild_id = request.query.get('guild_id')
+        guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
+        requested_team = request.query.get('team') or ''
+        cache_key = (target, str(guild.id) if guild else '', requested_team)
+        now = time.monotonic()
+        cached = self.state_cache.get(cache_key)
+        if cached and now - cached['at'] < self.state_cache_ttl:
+            static = dict(cached['data'])
+        else:
+            teams = await self.store.teams()
+            active = await self.store.get_team(guild.id, target) if guild else 'A팀'
+            team = clean_name(requested_team or active, '팀 이름')
+            if team not in teams:
+                teams.append(team)
+            state = await self.store.state(team)
+            events = {e['id']: e for e in await self.store.events(team)}
+            library = await self.store.library(team)
+            for songs in library.values():
+                for song in songs:
+                    if song.get('assetId'):
+                        try:
+                            meta = await asyncio.to_thread(self.assets.get, song['assetId'])
+                            song['filename'] = meta['name']
+                            song['fileDuration'] = meta['duration']
+                        except (ValueError, OSError):
+                            # Preserve the record and ID. Never hide/delete a missing audio row.
+                            song['fileMissing'] = True
+            static = {
+                'webOnly': self.s.web_only,
+                'storage': self.store.mode,
+                'teams': teams,
+                'team': team,
+                'activeTeam': active,
+                'songs': library['entrance'],
+                'library': library,
+                'categories': SONG_CATEGORIES,
+                'fileStorage': storage_status(self.s),
+                'lineup': await self.store.lineup(team),
+                'state': state,
+                'events': self._event_rows(events),
+                'maxUploadMb': self.s.max_upload_mb,
+            }
+            self.state_cache[cache_key] = {'at': now, 'data': static}
+            # 방치된 키가 계속 늘지 않게 작게 제한한다.
+            if len(self.state_cache) > 64:
+                oldest = min(self.state_cache, key=lambda k: self.state_cache[k]['at'])
+                self.state_cache.pop(oldest, None)
+
+        channels = []
+        live = self._live_payload(target_bot, guild, target)
+        peer_voice_id = (live.get('otherBotVoice') or {}).get('channelId')
+        peer_label = (live.get('otherBotVoice') or {}).get('botLabel')
+        if guild:
             for c in guild.voice_channels:
                 perms = c.permissions_for(guild.me) if guild.me else None
                 occupied = peer_voice_id == str(c.id)
@@ -409,20 +477,10 @@ class WebPanel:
                                  'occupiedByOtherBot': occupied,
                                  'occupiedByLabel': peer_label if occupied else None,
                                  'available': bool(perms and perms.view_channel and perms.connect and perms.speak) and not occupied})
-        return response({
-            'ready': target_bot.is_ready(), 'webOnly': self.s.web_only, 'storage': self.store.mode,
-            'botTarget': target, 'botLabel': self.bot_label(target_bot), 'botTargets': self.bot_targets(),
-            'guilds': guilds, 'guildId': str(guild.id) if guild else None,
-            'teams': teams, 'team': team, 'activeTeam': active, 'songs': songs,
-            'library': library, 'categories': SONG_CATEGORIES, 'fileStorage': storage_status(self.s),
-            'lineup': await self.store.lineup(team), 'state': state, 'channels': channels,
-            'voice': target_bot.player.voice.status(guild) if guild else None,
-            'otherBotVoice': ({'channelId': peer_voice_id, 'channelName': peer_voice_name, 'botLabel': peer_label}
-                              if peer_voice_id else None),
-            'nowPlaying': target_bot.player.now.get(guild.id) if guild else None,
-            'events': self._event_rows(events),
-            'maxUploadMb': self.s.max_upload_mb,
-        })
+        payload = dict(static)
+        payload.update(live)
+        payload.update({'guilds': guilds, 'channels': channels})
+        return response(payload)
 
     def _event_tracks(self, doc: dict | None) -> list[dict]:
         """Normalize new multi-track docs and old single-source docs."""
