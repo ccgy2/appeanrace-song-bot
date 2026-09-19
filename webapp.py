@@ -279,7 +279,7 @@ class WebPanel:
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
                          'authMode': 'bearer', 'web': 'ok', 'build': 'library-20260919-1',
                          'capabilities': ['library-categories', 'atomic-rename', 'storage-check',
-                                          'dual-bot', 'per-bot-team'],
+                                          'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
                              x['id'] == 'secondary' and x['ready'] for x in bots),
                          'bots': bots, 'webOnly': self.s.web_only})
@@ -389,12 +389,26 @@ class WebPanel:
                         song['fileMissing'] = True
         songs = library['entrance']
         channels = []
+        peer_voice_id = None
+        peer_voice_name = None
+        peer_label = None
         if guild:
+            peer = getattr(target_bot, 'peer_bot', None)
+            if peer is not None:
+                peer_guild = peer.get_guild(guild.id)
+                peer_vc = peer_guild.voice_client if peer_guild else None
+                if peer_vc and peer_vc.channel:
+                    peer_voice_id = str(peer_vc.channel.id)
+                    peer_voice_name = peer_vc.channel.name
+                    peer_label = self.bot_label(peer)
             for c in guild.voice_channels:
                 perms = c.permissions_for(guild.me) if guild.me else None
+                occupied = peer_voice_id == str(c.id)
                 channels.append({'id': str(c.id), 'name': c.name,
                                  'members': len([m for m in c.members if not m.bot]),
-                                 'available': bool(perms and perms.view_channel and perms.connect and perms.speak)})
+                                 'occupiedByOtherBot': occupied,
+                                 'occupiedByLabel': peer_label if occupied else None,
+                                 'available': bool(perms and perms.view_channel and perms.connect and perms.speak) and not occupied})
         return response({
             'ready': target_bot.is_ready(), 'webOnly': self.s.web_only, 'storage': self.store.mode,
             'botTarget': target, 'botLabel': self.bot_label(target_bot), 'botTargets': self.bot_targets(),
@@ -403,6 +417,8 @@ class WebPanel:
             'library': library, 'categories': SONG_CATEGORIES, 'fileStorage': storage_status(self.s),
             'lineup': await self.store.lineup(team), 'state': state, 'channels': channels,
             'voice': target_bot.player.voice.status(guild) if guild else None,
+            'otherBotVoice': ({'channelId': peer_voice_id, 'channelName': peer_voice_name, 'botLabel': peer_label}
+                              if peer_voice_id else None),
             'nowPlaying': target_bot.player.now.get(guild.id) if guild else None,
             'events': self._event_rows(events),
             'maxUploadMb': self.s.max_upload_mb,
@@ -664,6 +680,8 @@ class WebPanel:
         channel = guild.get_channel(int(channel_id)) if channel_id else None
         if channel_id and channel is None:
             raise ValueError('선택한 통화방이 없습니다.')
+        if channel is not None and hasattr(target_bot, 'ensure_distinct_voice_channel'):
+            target_bot.ensure_distinct_voice_channel(guild, channel)
         player = target_bot.player
         if action == 'connect':
             await player.voice.connect(guild, channel)

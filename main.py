@@ -98,6 +98,8 @@ class AppearanceBot(commands.Bot):
         if not shutil.which(self.settings.ffmpeg):
             log.error('FFmpeg 미설치: 통화방 접속은 가능해도 오디오 재생이 불가능합니다.')
         for guild in self.guilds:
+            if self.slot == 'primary' and self.settings.secondary_token:
+                await self.store.ensure_dual_team_defaults(guild.id)
             await self.manage_idle(guild)
 
     async def on_command_error(self, ctx, error):
@@ -135,6 +137,28 @@ class AppearanceBot(commands.Bot):
                     pass
             log.warning('지정된 알림 채널(%s)을 사용할 수 없어 자동 채널을 사용합니다.', channel_id)
         return fallback if fallback is not None else text_channel(guild)
+
+    def peer_voice_channel(self, guild):
+        peer = self.peer_bot
+        if peer is None:
+            return None
+        peer_guild = peer.get_guild(guild.id)
+        if peer_guild is None:
+            return None
+        vc = peer_guild.voice_client
+        return vc.channel if vc and vc.channel else None
+
+    def ensure_distinct_voice_channel(self, guild, channel):
+        """청팀/백팀 봇이 같은 서버의 같은 통화방에 동시에 들어가는 것을 차단한다."""
+        if channel is None:
+            return
+        peer_channel = self.peer_voice_channel(guild)
+        if peer_channel is not None and int(peer_channel.id) == int(channel.id):
+            peer_label = getattr(self.peer_bot, 'label', '다른 봇')
+            raise VoiceError(
+                f'{self.label}은 {peer_label}이 들어가 있는 “{peer_channel.name}” 통화방에는 함께 들어갈 수 없습니다. '
+                '청팀과 백팀은 서로 다른 통화방을 선택하세요.'
+            )
 
     async def now_embed(self, guild, channel, team: str):
         playing = self.player.now.get(guild.id, {})
@@ -184,6 +208,7 @@ class AppearanceBot(commands.Bot):
         song = await self.store.song(team, name) if name else None
         if song is None:
             raise ValueError(f'{order}번 타자의 이름과 등장곡을 먼저 등록하세요.')
+        self.ensure_distinct_voice_channel(guild, voice_channel)
         ok = await self.player.play(guild, team, song, voice_channel, order=order)
         if ok:
             await self.now_embed(guild, channel, team)
@@ -221,8 +246,19 @@ class AppearanceBot(commands.Bot):
     async def on_voice_state_update(self, member, before, after):
         guild = member.guild
         await self.manage_idle(guild)
+
+        # 관리자가 Discord에서 봇을 직접 이동시킨 경우에도 두 봇이 같은 통화방에 겹치지 않게 한다.
+        if member.bot:
+            if self.user and member.id == self.user.id and after.channel is not None and before.channel != after.channel:
+                try:
+                    self.ensure_distinct_voice_channel(guild, after.channel)
+                except VoiceError as exc:
+                    await self.player.leave(guild)
+                    await notify(await self.notification_channel(guild), '❌ ' + str(exc))
+            return
+
         # 퇴장/음소거 같은 상태 변경은 무시하고, 새 입장 또는 다른 통화방으로 이동한 경우만 처리한다.
-        if member.bot or after.channel is None or before.channel == after.channel:
+        if after.channel is None or before.channel == after.channel:
             return
         key = (guild.id, member.id)
         now = time.monotonic()
@@ -258,6 +294,7 @@ class AppearanceBot(commands.Bot):
                     # 다른 방에서 사람이 사용 중이면 자동 등장곡 때문에 봇을 강제로 이동시키지 않는다.
                     if any(not m.bot for m in guild.voice_client.channel.members):
                         return
+                self.ensure_distinct_voice_channel(guild, after.channel)
                 ok = await self.player.play(guild, team, song, after.channel, order)
                 if ok:
                     await self.store.set_team(guild.id, team, self.slot)
@@ -281,6 +318,8 @@ class Control(discord.ui.Button):
         guild = interaction.guild
         team = await self.app.store.get_team(guild.id, self.app.slot)
         voice = member_channel(interaction.user)
+        if voice is not None:
+            self.app.ensure_distinct_voice_channel(guild, voice)
         if self.action == 'stop':
             self.app.player.stop(guild)
         elif self.action == 'next':
@@ -381,7 +420,9 @@ def install_commands(bot: AppearanceBot):
 
     @bot.command(name='입장')
     async def join(ctx):
-        vc = await bot.player.voice.connect(ctx.guild, member_channel(ctx.author))
+        target_channel = member_channel(ctx.author)
+        bot.ensure_distinct_voice_channel(ctx.guild, target_channel)
+        vc = await bot.player.voice.connect(ctx.guild, target_channel)
         await ctx.send(f'🔊 {vc.channel.name}에 연결했습니다.')
         await bot.manage_idle(ctx.guild)
 
@@ -423,7 +464,9 @@ def install_commands(bot: AppearanceBot):
         song = await bot.store.song(team, clean_name(name))
         if not song:
             raise ValueError('등록된 등장곡이 없습니다.')
-        ok = await bot.player.play(ctx.guild, team, song, member_channel(ctx.author), preview=True)
+        target_channel = member_channel(ctx.author)
+        bot.ensure_distinct_voice_channel(ctx.guild, target_channel)
+        ok = await bot.player.play(ctx.guild, team, song, target_channel, preview=True)
         if ok:
             await bot.now_embed(ctx.guild, ctx.channel, team)
         await bot.manage_idle(ctx.guild)
@@ -435,7 +478,9 @@ def install_commands(bot: AppearanceBot):
         song = await bot.store.song(team, clean_name(name))
         if not song:
             raise ValueError('등록된 등장곡이 없습니다.')
-        ok = await bot.player.play(ctx.guild, team, song, member_channel(ctx.author))
+        target_channel = member_channel(ctx.author)
+        bot.ensure_distinct_voice_channel(ctx.guild, target_channel)
+        ok = await bot.player.play(ctx.guild, team, song, target_channel)
         if ok:
             await bot.now_embed(ctx.guild, ctx.channel, team)
         await bot.manage_idle(ctx.guild)
@@ -445,7 +490,9 @@ def install_commands(bot: AppearanceBot):
         song = await bot.store.song(team, clean_name(name), category)
         if not song:
             raise ValueError('이 종류에 등록된 곡이 없습니다. 웹 음악 라이브러리를 확인하세요.')
-        ok = await bot.player.play(ctx.guild, team, song, member_channel(ctx.author))
+        target_channel = member_channel(ctx.author)
+        bot.ensure_distinct_voice_channel(ctx.guild, target_channel)
+        ok = await bot.player.play(ctx.guild, team, song, target_channel)
         if ok:
             await bot.now_embed(ctx.guild, ctx.channel, team)
         await bot.manage_idle(ctx.guild)

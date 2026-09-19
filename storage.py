@@ -114,7 +114,7 @@ class Store:
                 names = {r.id for r in self.db.collection('teams').list_documents(timeout=12)}
             else:
                 names = {p[0].split('/')[1] for p in self.sql.execute("SELECT path FROM docs WHERE substr(path,1,6)='teams/'")}
-            return sorted(names | {'A팀'})
+            return sorted(names | {'A팀', '청팀', '백팀'})
         return await self._run(work)
 
     async def create_team(self, team: str):
@@ -127,8 +127,25 @@ class Store:
 
     async def get_team(self, guild_id: int, slot: str = 'primary') -> str:
         d = await self._run(self._read, f'guilds/{guild_id}')
+        secondary = str(slot or 'primary').lower() == 'secondary'
         key = self._slot_key(slot, 'team', 'teamSecondary')
-        return (d or {}).get(key, 'A팀')
+        default_team = '백팀' if secondary else '청팀'
+        return (d or {}).get(key, default_team)
+
+    async def ensure_dual_team_defaults(self, guild_id: int):
+        """2봇 모드를 처음 켠 서버만 청팀/백팀 기본값으로 안전하게 초기화한다."""
+        path = f'guilds/{guild_id}'
+        d = await self._run(self._read, path) or {}
+        if d.get('dualTeamDefaultsV2'):
+            return
+        await self.create_team('청팀')
+        await self.create_team('백팀')
+        body = {'dualTeamDefaultsV2': True}
+        if not d.get('team') or d.get('team') == 'A팀':
+            body['team'] = '청팀'
+        if not d.get('teamSecondary') or d.get('teamSecondary') == 'A팀':
+            body['teamSecondary'] = '백팀'
+        await self._run(self._write, path, body, True)
 
     async def set_team(self, guild_id: int, team: str, slot: str = 'primary'):
         await self.create_team(team)
