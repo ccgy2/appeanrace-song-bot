@@ -6,6 +6,9 @@ import importlib.metadata
 import json
 import logging
 import secrets
+import base64
+import os
+import re
 import shutil
 import time
 from collections import defaultdict, deque
@@ -17,6 +20,22 @@ from validation import EVENTS, clean_name, validate_song
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
 SESSION_TTL = 8 * 60 * 60
+USERNAME_RE = re.compile(r'^[a-z0-9_.-]{3,24}$')
+PBKDF2_ROUNDS = 310_000
+
+def password_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or os.urandom(16)
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, PBKDF2_ROUNDS)
+    return f'pbkdf2_sha256${PBKDF2_ROUNDS}${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(dk).decode()}'
+
+def password_ok(password: str, encoded: str) -> bool:
+    try:
+        alg, rounds, salt64, expected64 = encoded.split('$', 3)
+        if alg != 'pbkdf2_sha256': return False
+        salt=base64.urlsafe_b64decode(salt64); expected=base64.urlsafe_b64decode(expected64)
+        actual=hashlib.pbkdf2_hmac('sha256', password.encode(), salt, int(rounds))
+        return hmac.compare_digest(actual, expected)
+    except Exception: return False
 CORS_METHODS = {'GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS'}
 CORS_HEADERS = {'authorization', 'content-type', 'x-csrf-token', 'range'}
 
@@ -68,6 +87,10 @@ class WebPanel:
             web.get('/healthz', self.health),
             web.get('/api/connection', self.connection),
             web.post('/api/login', self.login),
+            web.post('/api/signup', self.signup),
+            web.get('/api/users', self.users),
+            web.put('/api/users/{username}', self.update_user),
+            web.delete('/api/users/{username}', self.remove_user),
             web.get('/api/session', self.session),
             web.post('/api/logout', self.logout),
             web.get('/api/state', self.state),
@@ -131,7 +154,7 @@ class WebPanel:
     @web.middleware
     async def security(self, request, handler):
         try:
-            if request.path.startswith('/api/') and request.path not in {'/api/login', '/api/connection'}:
+            if request.path.startswith('/api/') and request.path not in {'/api/login', '/api/signup', '/api/connection'}:
                 authorization = request.headers.get('Authorization', '')
                 if authorization:
                     parts = authorization.split()
@@ -150,6 +173,12 @@ class WebPanel:
                 if mode == 'bearer' and sess.get('origin') != self.request_origin(request):
                     raise web.HTTPForbidden(text='로그인한 웹사이트에서 다시 시도하세요.')
                 request['session'], request['session_key'] = sess, key
+                role = sess.get('role', 'pending')
+                if role not in {'admin', 'player'}:
+                    raise web.HTTPForbidden(text='관리자 승인 대기 중인 계정입니다.')
+                admin_only = (request.path.startswith('/api/users') or request.path in {'/api/team','/api/songs','/api/lineup','/api/upload','/api/events','/api/export'})
+                if admin_only and role != 'admin':
+                    raise web.HTTPForbidden(text='관리자 권한이 필요합니다.')
                 if request.method not in {'GET', 'HEAD'}:
                     csrf = request.headers.get('X-CSRF-Token', '')
                     if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
@@ -191,50 +220,59 @@ class WebPanel:
                          'authMode': 'bearer', 'web': 'ok', 'build': 'linked-20260919-1',
                          'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only})
 
+    async def _ensure_admin(self):
+        if self.s.web_password and await self.store.web_user('admin') is None:
+            await self.store.save_web_user('admin', {'passwordHash': password_hash(self.s.web_password), 'displayName':'관리자', 'role':'admin', 'enabled':True, 'createdAt':int(time.time())})
+
+    def _limit_login(self, request):
+        now=time.monotonic(); ip=request.remote or 'unknown'; window=self.attempts[ip]
+        while window and now-window[0]>300: window.popleft()
+        if len(window)>=10: raise web.HTTPTooManyRequests(text='로그인 시도가 많습니다. 5분 뒤에 다시 시도하세요.')
+        window.append(now); return now, window
+
+    async def signup(self, request):
+        await self._ensure_admin(); d=await body(request)
+        username=str(d.get('username','')).strip().lower(); display=str(d.get('displayName','')).strip(); password=str(d.get('password',''))
+        if not USERNAME_RE.fullmatch(username) or username=='admin': raise ValueError('아이디는 영문 소문자, 숫자, _, -, . 조합 3~24자로 입력하세요.')
+        if not 2<=len(display)<=30: raise ValueError('표시 이름은 2~30자로 입력하세요.')
+        if not 10<=len(password)<=128: raise ValueError('비밀번호는 10자 이상으로 입력하세요.')
+        if await self.store.web_user(username): raise ValueError('이미 사용 중인 아이디입니다.')
+        await self.store.save_web_user(username, {'passwordHash':password_hash(password),'displayName':display,'role':'pending','enabled':True,'createdAt':int(time.time())})
+        return response({'ok':True,'message':'가입 신청 완료! 관리자가 재생자로 승인하면 로그인할 수 있습니다.'},201)
+
     async def login(self, request):
-        if not self.s.web_password:
-            raise web.HTTPForbidden(text='웹 비밀번호가 설정되지 않았습니다.')
-        now = time.monotonic()
-        # 프록시 전달 IP를 무조건 신뢰하지 않는다. 단일 프록시일 때 제한은 사용자끼리 공유된다.
-        ip = request.remote or 'unknown'
-        if len(self.attempts) > 2048:
-            self.attempts = defaultdict(deque, {k: v for k, v in self.attempts.items() if v and now - v[-1] < 300})
-        window = self.attempts[ip]
-        while window and now - window[0] > 300:
-            window.popleft()
-        if len(window) >= 10:
-            return response({'error': '로그인 시도가 많습니다. 5분 뒤에 다시 시도하세요.'}, 429)
-        window.append(now)
-        data = await body(request)
-        mode = data.get('authMode', 'cookie')
-        if mode not in {'cookie', 'bearer'}:
-            raise ValueError('지원하지 않는 로그인 방식입니다.')
-        supplied = str(data.get('password', ''))
-        a = hashlib.sha256(supplied.encode()).digest()
-        b = hashlib.sha256(self.s.web_password.encode()).digest()
-        if not hmac.compare_digest(a, b):
-            raise web.HTTPUnauthorized(text='비밀번호가 맞지 않습니다.')
-        window.clear()
-        self.sessions = {k: v for k, v in self.sessions.items() if v['expires'] > now}
-        if len(self.sessions) >= 256:
-            oldest = min(self.sessions, key=lambda k: self.sessions[k]['expires'])
-            self.sessions.pop(oldest)
-        old = request.cookies.get(COOKIE)
-        if old:
-            self.sessions.pop(old, None)
-        key, csrf = secrets.token_urlsafe(40), secrets.token_urlsafe(32)
-        self.sessions[key] = {'expires': now + SESSION_TTL, 'csrf': csrf,
-                              'mode': mode, 'origin': self.request_origin(request)}
-        if mode == 'bearer':
-            # Do not put tokens into a URL or depend on third-party cookie support.
-            resp = response({'ok': True, 'csrf': csrf, 'accessToken': key, 'expiresIn': SESSION_TTL})
-        else:
-            resp = response({'ok': True, 'csrf': csrf})
-            resp.set_cookie(COOKIE, key, httponly=True, secure=self.s.secure_cookie, samesite='Strict', max_age=SESSION_TTL, path='/')
-        return resp
+        await self._ensure_admin(); now,window=self._limit_login(request); d=await body(request)
+        mode=d.get('authMode','cookie'); username=str(d.get('username') or 'admin').strip().lower(); supplied=str(d.get('password',''))
+        if mode not in {'cookie','bearer'}: raise ValueError('지원하지 않는 로그인 방식입니다.')
+        user=await self.store.web_user(username)
+        if not user or not password_ok(supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
+        if not user.get('enabled',True): raise web.HTTPForbidden(text='사용이 중지된 계정입니다.')
+        if user.get('role')=='pending': raise web.HTTPForbidden(text='관리자 승인 대기 중입니다.')
+        window.clear(); key,csrf=secrets.token_urlsafe(40),secrets.token_urlsafe(32)
+        sess={'expires':now+SESSION_TTL,'csrf':csrf,'mode':mode,'origin':self.request_origin(request),'username':username,'displayName':user.get('displayName',username),'role':user.get('role')}
+        self.sessions[key]=sess; payload={'ok':True,'csrf':csrf,'user':{'username':username,'displayName':sess['displayName'],'role':sess['role']}}
+        if mode=='bearer': payload.update({'accessToken':key,'expiresIn':SESSION_TTL}); return response(payload)
+        resp=response(payload); resp.set_cookie(COOKIE,key,httponly=True,secure=self.s.secure_cookie,samesite='Strict',max_age=SESSION_TTL,path='/'); return resp
+
+    async def users(self, request):
+        rows=await self.store.web_users(); return response({'users':[{k:v for k,v in u.items() if k!='passwordHash'} for u in rows]})
+
+    async def update_user(self, request):
+        username=request.match_info['username'].strip().lower()
+        if username=='admin': raise ValueError('기본 관리자 계정 권한은 변경할 수 없습니다.')
+        user=await self.store.web_user(username)
+        if not user: raise ValueError('계정을 찾을 수 없습니다.')
+        d=await body(request); role=d.get('role',user.get('role','pending'))
+        if role not in {'pending','player'}: raise ValueError('승인 대기 또는 재생자만 지정할 수 있습니다.')
+        await self.store.save_web_user(username,{'role':role,'enabled':bool(d.get('enabled',user.get('enabled',True)))},True); return response({'ok':True})
+
+    async def remove_user(self, request):
+        username=request.match_info['username'].strip().lower()
+        if username=='admin': raise ValueError('기본 관리자 계정은 삭제할 수 없습니다.')
+        await self.store.delete_web_user(username); self.sessions={k:v for k,v in self.sessions.items() if v.get('username')!=username}; return response({'ok':True})
 
     async def session(self, request):
-        return response({'csrf': request['session']['csrf']})
+        return response({'csrf':request['session']['csrf'],'user':{k:request['session'].get(k) for k in ('username','displayName','role')}})
 
     async def logout(self, request):
         self.sessions.pop(request['session_key'], None)

@@ -210,6 +210,26 @@ class Store:
             result['teams'][name] = {'songs': await self.songs(name), 'lineup': await self.lineup(name), 'state': await self.state(name), 'events': await self.events(name)}
         return result
 
+
+    # ---- Web accounts -------------------------------------------------
+    async def web_user(self, username: str) -> dict | None:
+        username = str(username or '').strip().lower()
+        if not username: return None
+        d = await self._run(self._read, f'webUsers/{username}')
+        return {'username': username, **d} if d is not None else None
+
+    async def web_users(self) -> list[dict]:
+        rows = await self._run(self._list, 'webUsers')
+        return sorted([{'username': d['id'], **{k:v for k,v in d.items() if k != 'id'}} for d in rows], key=lambda x: (x.get('role') != 'admin', x.get('username','')))
+
+    async def save_web_user(self, username: str, data: dict, merge: bool = False):
+        username = str(username or '').strip().lower()
+        if not username: raise ValueError('아이디가 필요합니다.')
+        await self._run(self._write, f'webUsers/{username}', data, merge)
+
+    async def delete_web_user(self, username: str):
+        await self._run(self._apply, [(f'webUsers/{str(username).strip().lower()}', None)])
+
     async def close(self):
         if self.sql is not None:
             await self._run(self.sql.close)
