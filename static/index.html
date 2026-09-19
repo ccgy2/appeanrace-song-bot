@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#10141e"><title>APPEARANCE · 등장곡 스튜디오</title>
+<meta name="theme-color" content="#10141e"><title>APPEARANCE · 우리 팀 음악 스튜디오</title>
 <link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script src="/config.js" defer></script><script src="/app.js" defer></script>
 </head>
 <body>
@@ -19,42 +19,49 @@
   <aside class="sidebar">
     <a class="brand" href="/"><div class="brand-mark small">A<span>♪</span></div><div>APPEARANCE<small>등장곡 스튜디오</small></div></a>
     <p class="nav-heading">WORKSPACE</p>
-    <nav aria-label="주 메뉴"><button class="nav active" data-tab="songs">♫ <span>등장곡 라이브러리</span></button><button class="nav" data-tab="lineup">▦ <span>타순 관리</span></button><button class="nav" data-tab="events">◉ <span>경기 사운드</span></button><button class="nav" data-tab="diagnostics">⌁ <span>연결 진단</span></button><button class="nav admin-only" data-tab="users">♙ <span>재생자 관리</span></button></nav>
+    <nav aria-label="주 메뉴"><button class="nav active" data-tab="songs">♫ <span>음악 라이브러리</span></button><button class="nav" data-tab="lineup">▦ <span>타순 관리</span></button><button class="nav" data-tab="events">◉ <span>경기 사운드</span></button><button class="nav" data-tab="diagnostics">⌁ <span>연결 진단</span></button><button class="nav admin-only" data-tab="users">♙ <span>재생자 관리</span></button></nav>
     <div class="sidebar-bottom"><p class="tiny" id="signed-user"></p><div class="signal"><span id="sidebar-dot" class="dot"></span><span id="sidebar-status">상태 확인 중</span></div><p class="tiny">한 곡의 시작이<br>우리 팀의 분위기를 바꿉니다.</p><button id="logout" class="ghost wide">로그아웃</button></div>
   </aside>
   <main>
-    <header class="topbar"><div><span class="eyebrow">YOUR TEAM, YOUR SOUND</span><h1 id="page-title">등장곡 라이브러리</h1></div><div class="topbar-actions"><span class="badge" id="storage-badge">저장소</span><button id="logout-mobile" class="ghost mobile-only">로그아웃</button><button id="refresh" class="ghost">↻ 새로고침</button></div></header>
+    <header class="topbar"><div><span class="eyebrow">YOUR TEAM, YOUR SOUND</span><h1 id="page-title">음악 라이브러리</h1></div><div class="topbar-actions"><span class="badge" id="storage-badge">저장소</span><button id="logout-mobile" class="ghost mobile-only">로그아웃</button><button id="refresh" class="ghost">↻ 새로고침</button></div></header>
     <section class="workspace card" aria-label="서버와 팀 선택">
       <label>Discord 서버<select id="guild-select"><option value="">연결된 서버 없음</option></select></label>
       <label>관리할 팀<select id="team-select"></select></label>
       <button id="new-team" class="ghost">＋ 팀 추가</button><button id="activate-team" class="soft">이 팀으로 경기 진행</button>
     </section>
     <p id="workspace-note" class="notice" hidden></p>
+    <section id="storage-notice" class="storage-notice" role="status"><strong id="storage-title">오디오 저장소 확인 중</strong><p id="storage-message" class="tiny"></p></section>
     <section class="voice-bar card" aria-label="통화방 제어">
       <div class="voice-info"><div class="voice-icon">◖))</div><div><strong id="voice-title">통화방 연결</strong><p id="voice-detail" class="tiny">통화방을 선택하고 연결하세요.</p></div></div>
       <div class="voice-controls"><select id="voice-select" aria-label="통화방 선택"><option value="">통화방 선택</option></select><button id="connect" class="primary">연결</button><button id="disconnect" class="ghost">퇴장</button></div>
     </section>
     <p id="voice-error" class="notice danger" hidden></p>
     <section id="tab-songs" class="tab-panel">
-      <div class="hero"><div><p class="eyebrow accent">MAKE AN ENTRANCE</p><h2>오늘의 주인공에게,<br>딱 맞는 한 곡.</h2><p class="muted">링크 또는 오디오 파일로 등장곡을 등록하세요.<br>저장한 곡은 봇을 재시작하지 않아도 사용할 수 있어요.</p></div><div class="record" aria-hidden="true"><div class="record-label">A<br><small>SIDE 01</small></div></div></div>
+      <div class="hero"><div><p class="eyebrow accent">MAKE AN ENTRANCE</p><h2>등장부터 응원까지,<br>우리 팀의 모든 음악.</h2><p class="muted">등장곡 · 응원가 · 상황별 노래를 따로 등록하세요.<br>같은 닉네임도 종류별로 다른 곡을 저장할 수 있어요.</p></div><div class="record" aria-hidden="true"><div class="record-label">A<br><small>SIDE 01</small></div></div></div>
+      <div class="category-tabs" role="group" aria-label="음악 종류">
+        <button type="button" data-category="entrance" class="selected" aria-pressed="true">등장곡 <span id="count-entrance">0</span></button>
+        <button type="button" data-category="cheer" aria-pressed="false">응원가 <span id="count-cheer">0</span></button>
+        <button type="button" data-category="situation" aria-pressed="false">상황별 노래 <span id="count-situation">0</span></button>
+      </div>
+      <p id="category-description" class="tiny category-description">등장곡만 사용자 ID로 통화방 입장 시 자동 재생됩니다.</p>
       <div class="library-grid">
         <section class="card song-editor">
           <div class="section-head"><div><span class="step">01</span><h3 id="editor-title">새 등장곡 등록</h3></div><button id="reset-song" class="text-button" type="button">초기화</button></div>
           <form id="song-form">
-            <label for="song-name">선수 이름 <span class="required">*</span></label><input id="song-name" maxlength="64" placeholder="예: 김선수" required>
+            <label for="song-name"><span id="song-name-label">선수 닉네임</span> <span class="required">*</span></label><input id="song-name" maxlength="64" placeholder="예: 김선수" required><p class="tiny" id="rename-help" hidden>닉네임을 바꾸면 이 등장곡의 타순 이름도 함께 바뀝니다. Discord 사용자 ID와 오디오는 유지됩니다. Discord 서버 닉네임은 바뀌지 않습니다.</p>
             <div class="segmented" role="group" aria-label="노래 등록 방식"><button id="source-youtube" type="button" class="selected">↗ YouTube 링크</button><button id="source-upload" type="button">↑ 파일 업로드</button></div>
             <div id="youtube-fields"><label for="song-url">YouTube 영상 링크</label><input id="song-url" type="url" placeholder="https://www.youtube.com/watch?v=..."></div>
             <div id="upload-fields" hidden><label for="song-file" class="dropzone" id="dropzone"><span class="upload-arrow">↑</span><strong>오디오 파일을 놓거나 선택하세요</strong><span class="tiny" id="upload-limit">MP3 · WAV · M4A · OGG · 최대 25MB</span><input id="song-file" type="file" accept=".mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm"></label><p class="tiny accent" id="upload-name">선택된 파일 없음</p><progress id="upload-progress" max="100" value="0" hidden></progress><audio id="upload-preview" controls preload="metadata" hidden></audio></div>
             <div class="two-cols"><label>시작 시간<input id="song-start" value="0:00" placeholder="0:10" required inputmode="decimal"></label><label>끝 시간<input id="song-end" value="0:30" placeholder="0:40" required inputmode="decimal"></label></div>
             <p class="tiny">0:10 ~ 0:40이면 10초부터 30초간 재생해요.</p>
-            <details><summary>자동 입장곡 연결 설정 <span class="tiny">선택</span></summary><label for="member-id">Discord 사용자 ID</label><input id="member-id" inputmode="numeric" placeholder="닉네임이 바뀌어도 찾을 수 있어요" maxlength="22"><p class="tiny">사용자 ID를 등록하면 해당 사용자가 통화방에 입장하거나 다른 통화방으로 이동할 때 자동 재생됩니다. ID 연결에는 역할이나 타순 등록이 필요하지 않습니다. ID가 없는 기존 곡만 닉네임·타순·‘등장곡 재생인’ 역할 방식으로 동작합니다.</p></details>
+            <details id="auto-song-settings"><summary>자동 입장곡 연결 설정 <span class="tiny">선택</span></summary><label for="member-id">Discord 사용자 ID</label><input id="member-id" inputmode="numeric" placeholder="닉네임이 바뀌어도 찾을 수 있어요" maxlength="22"><p class="tiny">사용자 ID를 등록하면 해당 사용자가 통화방에 입장하거나 다른 통화방으로 이동할 때 자동 재생됩니다. ID 연결에는 역할이나 타순 등록이 필요하지 않습니다. ID가 없는 기존 곡만 닉네임·타순·‘등장곡 재생인’ 역할 방식으로 동작합니다.</p></details>
             <button class="primary wide" type="submit" id="save-song">＋ 등장곡 저장</button>
-            <p class="tiny">직접 업로드한 파일은 서버 저장 공간에 보관됩니다.</p>
+            <p class="tiny">파일 업로드 후 반드시 저장을 누르세요. 위쪽의 오디오 저장소 상태도 확인해주세요.</p>
           </form>
         </section>
         <section class="card library">
           <div class="section-head"><div><span class="step">02</span><h3>우리 팀 라이브러리 <span class="count" id="song-count">0</span></h3></div></div>
-          <label class="search-label"><span class="sr-only">선수 이름 검색</span><input id="search" type="search" placeholder="⌕  선수 이름으로 검색"></label>
+          <label class="search-label"><span class="sr-only">닉네임 또는 곡 이름 검색</span><input id="search" type="search" placeholder="⌕  닉네임 / 곡 이름 검색"></label>
           <div id="song-list" class="song-list"></div>
           <div class="tip"><span>i</span><p>재생 버튼은 선택한 <strong>Discord 통화방</strong>에서 소리를 재생합니다. YouTube 제한이 있는 환경에서는 파일 업로드를 사용해 보세요.</p></div>
         </section>
@@ -65,13 +72,13 @@
       <section class="card"><div class="section-head"><h3>1번부터 9번까지</h3><button id="save-lineup" class="primary">타순 저장</button></div><div id="lineup-grid" class="lineup-grid"></div><p class="tiny">타순을 수정한 뒤 반드시 저장하세요. ‘재생’은 마지막으로 저장한 타순을 사용합니다.</p></section>
     </section>
     <section id="tab-events" class="tab-panel" hidden>
-      <div class="section-intro"><p class="eyebrow accent">GAME SOUNDBOARD</p><h2>경기의 순간마다, 사운드.</h2><p class="muted">기본 효과음을 재생하거나 우리 팀 오디오로 바꿔보세요.</p></div><div id="events-grid" class="events-grid"></div>
+      <div class="section-intro"><p class="eyebrow accent">GAME SOUNDBOARD</p><h2>경기의 순간마다, 사운드.</h2><p class="muted">기본 효과음은 그대로 유지됩니다. 관리자는 상황별 노래 라이브러리에서 홈런·득점 등에 사용할 곡을 골라 연결할 수 있어요.</p></div><div id="events-grid" class="events-grid"></div>
     </section>
     <section id="tab-diagnostics" class="tab-panel" hidden>
       <div class="section-intro"><p class="eyebrow accent">CONNECTION CHECK</p><h2>연결 상태를 확인해요.</h2><p class="muted">통화방 접속과 노래 재생 문제를 나눠서 확인하세요.</p></div>
-      <div class="diagnostic-grid"><section class="card"><div class="section-head"><h3>설치 및 실행 상태</h3><button id="reload-diagnostics" class="ghost">다시 확인</button></div><div id="diagnostic-values"></div></section><section class="card"><h3>연결 전 체크리스트</h3><div id="diagnostic-checks"></div><button type="button" id="export-backup" class="soft wide">곡·타순 설정 백업</button><p class="tiny">JSON 설정만 내려받습니다. 오디오 파일은 DATA_DIR 폴더를 따로 백업하세요.</p></section></div>
+      <div class="diagnostic-grid"><section class="card"><div class="section-head"><h3>설치 및 실행 상태</h3><button id="reload-diagnostics" class="ghost">다시 확인</button></div><div id="diagnostic-values"></div></section><section class="card"><h3>연결 전 체크리스트</h3><div id="diagnostic-checks"></div><button type="button" id="export-backup" class="soft wide">곡·타순 설정 백업 (JSON)</button><button type="button" id="export-audio-backup" class="primary wide">오디오 포함 음악 백업 (ZIP)</button><p class="tiny">ZIP에는 등록 정보와 현재 남아 있는 업로드 파일을 넣습니다. 이미 사라진 파일, 계정·비밀번호, 기본 sounds는 포함하지 않습니다. 업로드 용량만큼 다운로드할 수 있어요.</p></section></div>
     </section>
-<section id="tab-users" class="tab-panel" hidden><div class="section-intro"><p class="eyebrow accent">MEMBER ACCESS</p><h2>재생자를 관리해요.</h2><p class="muted">가입 신청을 승인하면 재생자가 됩니다. 재생자는 등장곡 등록·수정·오디오 업로드와 Discord 재생 제어를 사용할 수 있습니다. 곡 삭제, 팀/타순/회원 관리는 관리자만 가능합니다.</p></div><section class="card"><div class="section-head"><h3>계정 목록</h3><button id="reload-users" class="ghost">↻ 새로고침</button></div><div id="user-list" class="user-list"></div></section></section>    <footer class="player-bar"><div class="playing-title"><span class="mini-record" aria-hidden="true">♪</span><div><span class="eyebrow">NOW PLAYING</span><strong id="playing-title">재생 대기 중</strong><small id="playing-status">Discord 통화방에서 재생됩니다</small></div></div><div class="player-actions"><button id="next-player" class="soft">다음 타자 ▷</button><button id="stop" class="ghost">■ 정지</button></div><label class="volume-label">볼륨 <span id="volume-value">50%</span><input id="volume" type="range" min="0" max="100" value="50" aria-label="볼륨"></label></footer>
+<section id="tab-users" class="tab-panel" hidden><div class="section-intro"><p class="eyebrow accent">MEMBER ACCESS</p><h2>재생자를 관리해요.</h2><p class="muted">가입 신청을 승인하면 재생자가 됩니다. 재생자는 세 종류 곡 등록·수정·닉네임 변경·오디오 업로드와 Discord 재생 제어를 사용할 수 있습니다. 곡 삭제, 팀/타순/회원 관리는 관리자만 가능합니다.</p></div><section class="card"><div class="section-head"><h3>계정 목록</h3><button id="reload-users" class="ghost">↻ 새로고침</button></div><div id="user-list" class="user-list"></div></section></section>    <footer class="player-bar"><div class="playing-title"><span class="mini-record" aria-hidden="true">♪</span><div><span class="eyebrow">NOW PLAYING</span><strong id="playing-title">재생 대기 중</strong><small id="playing-status">Discord 통화방에서 재생됩니다</small></div></div><div class="player-actions"><button id="next-player" class="soft">다음 타자 ▷</button><button id="stop" class="ghost">■ 정지</button></div><label class="volume-label">볼륨 <span id="volume-value">50%</span><input id="volume" type="range" min="0" max="100" value="50" aria-label="볼륨"></label></footer>
     <p class="page-footer">APPEARANCE STUDIO <span>·</span> 사용할 권리가 있는 음원만 등록해주세요.</p>
   </main>
 </div>
