@@ -1,0 +1,128 @@
+test_concurrent_writes (test_core.StoreTests.test_concurrent_writes) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_crud (test_core.StoreTests.test_crud) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_duplicate_rename (test_core.StoreTests.test_duplicate_rename) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_events_export (test_core.StoreTests.test_events_export) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_legacy_schema_without_parent (test_core.StoreTests.test_legacy_schema_without_parent) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_lineup_range (test_core.StoreTests.test_lineup_range) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_rename_and_delete_lineup (test_core.StoreTests.test_rename_and_delete_lineup) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_sql_wildcards_do_not_leak (test_core.StoreTests.test_sql_wildcards_do_not_leak) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_state_and_team_persist (test_core.StoreTests.test_state_and_team_persist) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_asset_id (test_core.ValidationTests.test_asset_id) ... ok
+test_invalid_seconds (test_core.ValidationTests.test_invalid_seconds) ... ok
+test_legacy_command (test_core.ValidationTests.test_legacy_command) ... ok
+test_member_id (test_core.ValidationTests.test_member_id) ... ok
+test_name (test_core.ValidationTests.test_name) ... ok
+test_ranges (test_core.ValidationTests.test_ranges) ... ok
+test_seconds (test_core.ValidationTests.test_seconds) ... ok
+test_ssrf_rejected (test_core.ValidationTests.test_ssrf_rejected) ... ok
+test_url (test_core.ValidationTests.test_url) ... ok
+test_audio_upload_and_range (test_core.WebTests.test_audio_upload_and_range) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_auth_required (test_core.WebTests.test_auth_required) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_csrf (test_core.WebTests.test_csrf) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_fake_audio_rejected (test_core.WebTests.test_fake_audio_rejected) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_flow (test_core.WebTests.test_flow) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_invalid_song (test_core.WebTests.test_invalid_song) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_login_cookie (test_core.WebTests.test_login_cookie) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_logout (test_core.WebTests.test_logout) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_offline_controls_fail_clearly (test_core.WebTests.test_offline_controls_fail_clearly) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_oversize_json_rejected (test_core.WebTests.test_oversize_json_rejected) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_password_wrong (test_core.WebTests.test_password_wrong) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_rate_limit (test_core.WebTests.test_rate_limit) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_security_headers_and_secret_not_exposed (test_core.WebTests.test_security_headers_and_secret_not_exposed) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_static (test_core.WebTests.test_static) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_streamed_json_request (test_core.WebTests.test_streamed_json_request) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_backups_existing_configuration (test_split.DeploymentTests.test_backups_existing_configuration) ... ok
+test_custom_domain (test_split.DeploymentTests.test_custom_domain) ... ok
+test_generated_config (test_split.DeploymentTests.test_generated_config) ... ok
+test_mismatched_site_rejected (test_split.DeploymentTests.test_mismatched_site_rejected) ... ok
+test_predeploy_allows_runtime_railway_config (test_split.DeploymentTests.test_predeploy_allows_runtime_railway_config) ... ok
+test_predeploy_blocks_unexpected_public_file (test_split.DeploymentTests.test_predeploy_blocks_unexpected_public_file) ... ok
+test_preview_rejected (test_split.DeploymentTests.test_preview_rejected) ... ok
+test_deploy_https_only (test_split.OriginTests.test_deploy_https_only) ... ok
+test_invalid_origins (test_split.OriginTests.test_invalid_origins) ... ok
+test_normalize (test_split.OriginTests.test_normalize) ... ok
+test_settings_alias (test_split.OriginTests.test_settings_alias) ... ok
+test_bearer_csrf_enforced (test_split.SplitWebTests.test_bearer_csrf_enforced) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_bearer_no_cookie (test_split.SplitWebTests.test_bearer_no_cookie) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_connection_without_auth (test_split.SplitWebTests.test_connection_without_auth) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_cookie_cannot_impersonate_bearer (test_split.SplitWebTests.test_cookie_cannot_impersonate_bearer) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_cross_origin_song_lineup_export_delete (test_split.SplitWebTests.test_cross_origin_song_lineup_export_delete) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_cross_origin_upload_media_range (test_split.SplitWebTests.test_cross_origin_upload_media_range) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_discord_control_dispatch_mock (test_split.SplitWebTests.test_discord_control_dispatch_mock) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_expiry (test_split.SplitWebTests.test_expiry) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_logout_revokes_token (test_split.SplitWebTests.test_logout_revokes_token) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_new_static_paths (test_split.SplitWebTests.test_new_static_paths) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_origin_binding (test_split.SplitWebTests.test_origin_binding) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_preflight (test_split.SplitWebTests.test_preflight) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_preflight_reject_headers_methods (test_split.SplitWebTests.test_preflight_reject_headers_methods) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_query_token_not_supported (test_split.SplitWebTests.test_query_token_not_supported) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_same_origin_get_without_origin (test_split.SplitWebTests.test_same_origin_get_without_origin) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_unauthorized_readable (test_split.SplitWebTests.test_unauthorized_readable) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_untrusted_origins_blocked (test_split.SplitWebTests.test_untrusted_origins_blocked) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_alias_login (test_linked.LinkedAPIRegressionTests.test_alias_login) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_all_management_endpoints_require_login (test_linked.LinkedAPIRegressionTests.test_all_management_endpoints_require_login) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_bad_password_has_readable_401_not_origin_error (test_linked.LinkedAPIRegressionTests.test_bad_password_has_readable_401_not_origin_error) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_connection_does_not_expose_secret_or_metadata (test_linked.LinkedAPIRegressionTests.test_connection_does_not_expose_secret_or_metadata) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_direct_railway_https_login_behind_http_proxy (test_linked.LinkedAPIRegressionTests.test_direct_railway_https_login_behind_http_proxy) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_frontend_preflight_login_and_authenticated_state (test_linked.LinkedAPIRegressionTests.test_frontend_preflight_login_and_authenticated_state) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_untrusted_domains_and_originless_token_rejected (test_linked.LinkedAPIRegressionTests.test_untrusted_domains_and_originless_token_rejected) ... Firebase 미설정: 로컬 SQLite 사용. 재배포 시 DATA_DIR의 영구 저장소가 필요합니다.
+ok
+test_legacy_wrong_url_variables_cannot_break_this_bundle (test_linked.LinkedConfigurationTests.test_legacy_wrong_url_variables_cannot_break_this_bundle) ... ok
+test_malformed_profile_fails_closed (test_linked.LinkedConfigurationTests.test_malformed_profile_fails_closed) ... ok
+test_password_not_embedded_or_optional (test_linked.LinkedConfigurationTests.test_password_not_embedded_or_optional) ... ok
+test_preconfigured_domains (test_linked.LinkedConfigurationTests.test_preconfigured_domains) ... ok
+test_short_password_rejected (test_linked.LinkedConfigurationTests.test_short_password_rejected) ... ok
+test_website_copy_and_exact_csp (test_linked.LinkedConfigurationTests.test_website_copy_and_exact_csp) ... ok
+
+----------------------------------------------------------------------
+Ran 74 tests in 0.825s
+
+OK
