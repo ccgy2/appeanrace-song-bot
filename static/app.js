@@ -403,12 +403,35 @@ function renderEvents() {
   const grid=$('#events-grid'); grid.replaceChildren();
   for (const event of state.events) {
     const card=el('article',null,'card event-card');
-    card.append(el('h3',event.label));
-    card.append(el('p',event.custom?.songName || event.custom?.filename || event.custom?.file || `기본 효과음 ${event.bundledCount}개 · 무작위 재생`,'tiny'));
+    const titleRow=el('div',null,'section-head event-title-row');
+    const titleWrap=el('div');
+    titleWrap.append(el('h3',event.label));
+    if(event.customEvent) titleWrap.append(el('span','직접 추가','badge'));
+    titleRow.append(titleWrap);
+    if(currentUser?.role==='admin' && event.customEvent){
+      const actions=el('div',null,'event-mini-actions');
+      actions.append(bindButton('이름 수정','ghost',async()=>{
+        const next=prompt('새 상황 이름을 입력하세요.',event.label);
+        if(next===null)return;
+        const label=next.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
+        await api('/api/events','PUT',{team:selectedTeam,key:event.key,label});
+        await loadState();toast('경기 상황 이름을 수정했습니다.');
+      }));
+      actions.append(bindButton('상황 삭제','ghost delete',async()=>{
+        if(!confirm(`“${event.label}” 상황을 삭제할까요? 연결된 사운드 설정도 함께 해제됩니다.`))return;
+        await api(`/api/events?team=${encodeURIComponent(selectedTeam)}&key=${encodeURIComponent(event.key)}`,'DELETE');
+        await loadState();toast('경기 상황을 삭제했습니다.');
+      }));
+      titleRow.append(actions);
+    }
+    card.append(titleRow);
+    const sourceText=event.custom?.songName || event.custom?.filename || event.custom?.file || (event.customEvent ? '아직 연결된 사운드가 없습니다.' : `기본 효과음 ${event.bundledCount}개 · 무작위 재생`);
+    card.append(el('p',sourceText,'tiny'));
     card.append(bindButton('▶ 재생','soft',()=>control('event',{key:event.key})));
-    if (currentUser?.role === 'admin' && event.custom) card.append(bindButton('기본 복원','ghost',async()=>{
-      if (!confirm('등록한 효과음 연결을 해제하고 기본 효과음으로 돌아갈까요?')) return;
-      await api('/api/events','PUT',{team:selectedTeam,key:event.key,assetId:null}); await loadState(); toast('기본 효과음으로 복원했습니다.');
+    if (currentUser?.role === 'admin' && event.custom) card.append(bindButton(event.customEvent?'사운드 연결 해제':'기본 복원','ghost',async()=>{
+      const message=event.customEvent?'연결된 사운드만 해제할까요? 경기 상황 이름은 유지됩니다.':'등록한 효과음 연결을 해제하고 기본 효과음으로 돌아갈까요?';
+      if (!confirm(message)) return;
+      await api('/api/events','PUT',{team:selectedTeam,key:event.key,assetId:null}); await loadState(); toast(event.customEvent?'사운드 연결을 해제했습니다.':'기본 효과음으로 복원했습니다.');
     }));
     if (currentUser?.role !== 'admin') { grid.append(card); continue; }
     const songLabel=el('label','상황별 노래에서 선택'), chooser=el('select');
@@ -418,14 +441,14 @@ function renderEvents() {
     card.append(bindButton('선택한 노래 연결','ghost',async()=>{
       if(!chooser.value)throw new Error('상황별 노래를 먼저 등록하고 선택하세요.');
       await api('/api/events','PUT',{team:selectedTeam,key:event.key,songName:chooser.value});
-      await loadState();toast('경기 사운드에 연결했습니다.');
+      await loadState();toast('경기 상황에 노래를 연결했습니다.');
     }));
-    const label=el('label','오디오 파일로 바로 교체'), input=el('input'); input.type='file'; input.disabled=state?.fileStorage?.uploadsAllowed===false; input.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';
+    const label=el('label','오디오 파일로 바로 연결'), input=el('input'); input.type='file'; input.disabled=state?.fileStorage?.uploadsAllowed===false; input.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';
     input.addEventListener('change',()=>run(null,async()=>{
       const file=input.files[0]; if(!file)return;
       const team=selectedTeam;
       input.disabled=true;
-      try { toast('효과음 파일을 업로드하고 있습니다.'); const result=await uploadFile(file); await api('/api/events','PUT',{team,key:event.key,assetId:result.id}); await loadState(); toast('효과음을 교체했습니다.'); }
+      try { toast('경기 사운드를 업로드하고 있습니다.'); const result=await uploadFile(file); await api('/api/events','PUT',{team,key:event.key,assetId:result.id}); await loadState(); toast('경기 사운드를 연결했습니다.'); }
       finally {input.disabled=state?.fileStorage?.uploadsAllowed===false;}
     }));
     label.append(input);card.append(label);grid.append(card);
@@ -517,6 +540,13 @@ $('#next-player').addEventListener('click',()=>run($('#next-player'),()=>control
 $('#volume').addEventListener('input',()=>{$('#volume-value').textContent=$('#volume').value+'%';});
 $('#volume').addEventListener('change',()=>run(null,()=>control('volume',{value:Number($('#volume').value)})));
 $('#save-lineup').addEventListener('click',()=>run($('#save-lineup'),async()=>{const lineup={};$$('#lineup-grid select').forEach(s=>{lineup[s.dataset.order]=s.value;});await api('/api/lineup','PUT',{team:selectedTeam,lineup});await loadState();toast('타순을 저장했습니다.');}));
+$('#event-create-form').addEventListener('submit',e=>{e.preventDefault();run(e.submitter,async()=>{
+  if(currentUser?.role!=='admin')throw new Error('관리자만 경기 상황을 추가할 수 있습니다.');
+  if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
+  const label=$('#event-name').value.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
+  await api('/api/events','POST',{team:selectedTeam,label});
+  $('#event-name').value='';await loadState();toast('새 경기 상황을 추가했습니다.');
+});});
 $('#check-connection').addEventListener('click',()=>run($('#check-connection'),checkConnection));
 $('#export-backup').addEventListener('click',()=>run($('#export-backup'),exportBackup));
 $('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-backup'),async()=>{toast('음악 백업을 준비합니다. 파일이 많으면 시간이 걸릴 수 있어요.');await downloadFile('/api/backup','appearance-music-backup.zip');toast('백업 다운로드를 시작했습니다.');}));
