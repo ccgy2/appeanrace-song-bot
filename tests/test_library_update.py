@@ -278,6 +278,31 @@ class LibraryAPITests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.put('/api/events',json={'team':'팀','key':'homerun','songName':'새닉'},headers=self.h);self.assertEqual(r.status,403)
         r=await self.client.get('/api/backup',headers=self.h);self.assertEqual(r.status,403)
 
+    async def test_admin_can_create_rename_bind_and_delete_custom_game_situation(self):
+        r=await self.client.post('/api/events',json={'team':'팀','label':'상대 투수 교체'},headers=self.h)
+        self.assertEqual(r.status,201,await r.text());created=await r.json();key=created['key']
+        doc=await self.store.event('팀',key);self.assertTrue(doc['isCustom']);self.assertEqual(doc['label'],'상대 투수 교체')
+        r=await self.client.get('/api/state?team=팀',headers=self.h);data=await r.json()
+        row=next(x for x in data['events'] if x['key']==key);self.assertTrue(row['customEvent']);self.assertEqual(row['label'],'상대 투수 교체')
+        await self.save(name='교체 음악',category='situation')
+        r=await self.client.put('/api/events',json={'team':'팀','key':key,'songName':'교체 음악'},headers=self.h);self.assertEqual(r.status,200,await r.text())
+        r=await self.client.put('/api/events',json={'team':'팀','key':key,'label':'작전 타임'},headers=self.h);self.assertEqual(r.status,200,await r.text())
+        doc=await self.store.event('팀',key);self.assertEqual(doc['label'],'작전 타임');self.assertEqual(doc['songName'],'교체 음악')
+        r=await self.client.put('/api/events',json={'team':'팀','key':key,'assetId':None},headers=self.h);self.assertEqual(r.status,200)
+        doc=await self.store.event('팀',key);self.assertEqual(doc['label'],'작전 타임');self.assertNotIn('songName',doc)
+        r=await self.client.delete('/api/events?team=%ED%8C%80&key='+key,headers=self.h);self.assertEqual(r.status,200,await r.text())
+        self.assertIsNone(await self.store.event('팀',key))
+
+    async def test_custom_game_situation_duplicate_and_player_management_blocked(self):
+        r=await self.client.post('/api/events',json={'team':'팀','label':'홈런'},headers=self.h);self.assertEqual(r.status,400)
+        r=await self.client.post('/api/events',json={'team':'팀','label':'우리 상황'},headers=self.h);self.assertEqual(r.status,201);key=(await r.json())['key']
+        await self.client.post('/api/signup',json={'username':'player3','displayName':'재생자','password':'user-password-1234'})
+        await self.client.put('/api/users/player3',json={'role':'player'},headers=self.h)
+        ph=await self.login('player3','user-password-1234')
+        r=await self.client.post('/api/events',json={'team':'팀','label':'재생자 상황'},headers=ph);self.assertEqual(r.status,403)
+        r=await self.client.put('/api/events',json={'team':'팀','key':key,'label':'변경'},headers=ph);self.assertEqual(r.status,403)
+        r=await self.client.delete('/api/events?team=%ED%8C%80&key='+key,headers=ph);self.assertEqual(r.status,403)
+
     async def test_disabled_player_token_is_revoked(self):
         await self.client.post('/api/signup',json={'username':'player2','displayName':'재생자','password':'user-password-1234'})
         await self.client.put('/api/users/player2',json={'role':'player'},headers=self.h)
