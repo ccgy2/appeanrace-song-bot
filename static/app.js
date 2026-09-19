@@ -344,11 +344,13 @@ async function loadState(full = true) {
   fillSelect($('#team-select'), s.teams.map(t=>({id:t,name:t})), selectedTeam);
   const chosenVoice = $('#voice-select').value;
   fillSelect($('#voice-select'), s.channels.map(c=>({id:c.id,name:`${c.name} · ${c.members}명${c.occupiedByOtherBot ? ` (${c.occupiedByLabel || '다른 봇'} 사용 중 · 선택 불가)` : (c.available ? '' : ' (권한 부족)')}`})), chosenVoice || s.voice?.channelId || '', '통화방 선택');
-  $('#storage-badge').textContent = s.storage === 'firebase' ? '곡 정보: Firebase' : '곡 정보: 로컬 DB';
+  const durableRailway = s.storage === 'local' && s.fileStorage?.persistent === true;
+  $('#storage-badge').textContent = s.storage === 'firebase' ? '곡 정보: Firebase' : (durableRailway ? '곡 정보: Railway SQLite' : '곡 정보: 로컬 DB');
   const notes = [];
   if (s.webOnly) notes.push('웹 확인 모드입니다. 실제 접속·재생은 WEB_ONLY=false로 바꾸고 봇을 실행하세요.');
   else if (!s.ready) notes.push('봇이 Discord에 연결되지 않았습니다. 토큰·실행 로그를 확인하세요. 곡 등록은 가능합니다.');
-  if (s.storage === 'local') notes.push('로컬 저장 모드: 재배포 시 파일을 유지하려면 DATA_DIR에 영구 저장소가 필요합니다.');
+  if (s.storage === 'local' && !durableRailway) notes.push('로컬 저장 모드: 재배포 시 파일을 유지하려면 DATA_DIR에 영구 저장소가 필요합니다.');
+  if (durableRailway) notes.push('Railway 영구 저장 사용 중: 곡 정보와 업로드 파일을 /data Volume에 보관합니다.');
   if (s.activeTeam !== selectedTeam) notes.push(`${s.botLabel || '선택한 봇'}의 현재 경기 팀은 “${s.activeTeam}”입니다. 팀을 바꾸려면 “이 봇의 경기 팀으로 설정”을 누르세요.`);
   if (s.otherBotVoice) notes.push(`${s.otherBotVoice.botLabel || '다른 봇'}이 “${s.otherBotVoice.channelName}” 통화방을 사용 중입니다. 선택한 봇은 같은 통화방에 들어갈 수 없습니다.`);
   $('#workspace-note').hidden = !notes.length; $('#workspace-note').textContent = notes.join(' ');
