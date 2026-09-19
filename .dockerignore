@@ -17,3 +17,14 @@ uploads
 *.pem
 *.key
 tests
+
+.firebase/
+node_modules/
+.deploy-backups/
+*debug.log
+serviceAccountKey.json
+firebase-service-account.json
+
+test-output/
+
+웹사이트/
