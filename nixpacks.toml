@@ -1,5 +1,9 @@
+# Dockerfile is preferred. This is a fallback for existing Nixpacks deployments.
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.12"
+
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["...", "ffmpeg", "libopus", "deno"]
 
 [start]
-cmd = "python bot.py"
+cmd = "python main.py"
