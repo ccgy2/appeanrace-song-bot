@@ -13,3 +13,4 @@
 .login-card{max-width:520px}.diagnostic-row strong{overflow-wrap:anywhere;min-width:0;max-width:65%;text-align:right}
 
 @media(max-width:420px){.connection-line{align-items:flex-start}.server-connection{padding:12px}}
+.user-list{display:grid;gap:12px}.user-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px;border:1px solid var(--line,#2b3445);border-radius:14px}.user-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}#signup-form{margin-top:18px;padding-top:18px;border-top:1px solid var(--line,#2b3445)}#signup-form h3{margin-top:0}@media(max-width:720px){.user-row{align-items:flex-start;flex-direction:column}.user-actions{width:100%;justify-content:flex-start}}
