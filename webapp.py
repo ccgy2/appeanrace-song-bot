@@ -176,7 +176,13 @@ class WebPanel:
                 role = sess.get('role', 'pending')
                 if role not in {'admin', 'player'}:
                     raise web.HTTPForbidden(text='관리자 승인 대기 중인 계정입니다.')
-                admin_only = (request.path.startswith('/api/users') or request.path in {'/api/team','/api/songs','/api/lineup','/api/upload','/api/events','/api/export'})
+                # 재생자는 등장곡 파일 업로드와 곡 등록/수정까지 가능하다.
+                # 팀/타순/효과음/백업/회원 관리와 곡 삭제는 관리자 전용이다.
+                admin_only = (
+                    request.path.startswith('/api/users')
+                    or request.path in {'/api/team', '/api/lineup', '/api/events', '/api/export'}
+                    or (request.path == '/api/songs' and request.method == 'DELETE')
+                )
                 if admin_only and role != 'admin':
                     raise web.HTTPForbidden(text='관리자 권한이 필요합니다.')
                 if request.method not in {'GET', 'HEAD'}:

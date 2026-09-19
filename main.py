@@ -8,6 +8,7 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 from assets import Assets
+from autoplay import select_auto_song
 from config import Settings
 from player import Player
 from storage import Store
@@ -197,43 +198,46 @@ class AppearanceBot(commands.Bot):
     async def on_voice_state_update(self, member, before, after):
         guild = member.guild
         await self.manage_idle(guild)
-        if member.bot or before.channel is not None or after.channel is None:
-            return
-        if not any(r.name == ENTRANCE_ROLE for r in member.roles):
+        # 퇴장/음소거 같은 상태 변경은 무시하고, 새 입장 또는 다른 통화방으로 이동한 경우만 처리한다.
+        if member.bot or after.channel is None or before.channel == after.channel:
             return
         key = (guild.id, member.id)
         now = time.monotonic()
-        if now - self.join_cooldowns.get(key, 0) < 5:
+        # Discord가 짧은 시간 안에 중복 상태 이벤트를 보내는 경우만 막는다.
+        # 실제 퇴장 후 재입장은 최대한 바로 다시 재생될 수 있게 기존 5초보다 짧게 둔다.
+        if now - self.join_cooldowns.get(key, 0) < 1.0:
             return
         self.join_cooldowns[key] = now
         if len(self.join_cooldowns) > 10000:
             self.join_cooldowns = {k: t for k, t in self.join_cooldowns.items() if now - t < 60}
         channel = text_channel(guild)
         try:
-            # 현재 팀을 우선 검색, 구버전처럼 나머지 팀도 검색. 팀 이름은 공유 저장소임.
+            # 현재 팀을 먼저 찾되, 예전처럼 다른 팀에 등록된 사용자 ID도 이어서 찾는다.
             current = await self.store.get_team(guild.id)
             teams = [current] + [t for t in await self.store.teams() if t != current]
+            member_id = str(member.id)
+            has_legacy_role = any(r.name == ENTRANCE_ROLE for r in getattr(member, 'roles', []))
+
             for team in teams:
                 songs = await self.store.songs(team)
                 lineup = await self.store.lineup(team)
-                # ID를 등록했다면 닉네임 대신 ID로 찾는다. 미등록 기존 곡은 닉네임 비교 유지.
-                for order, name in lineup.items():
-                    song = next((s for s in songs if s['name'] == name), None)
-                    if not song:
-                        continue
-                    match = song.get('memberId') == str(member.id) if song.get('memberId') else name == member.display_name
-                    if match:
-                        if not member.voice or not member.voice.channel or member.voice.channel.id != after.channel.id:
-                            return
-                        if guild.voice_client and guild.voice_client.channel and guild.voice_client.channel.id != after.channel.id:
-                            # 다른 방에서 이미 진행 중인 경기/재생을 자동 입장곡이 끌고 가지 않는다.
-                            if any(not m.bot for m in guild.voice_client.channel.members):
-                                return
-                        ok = await self.player.play(guild, team, song, after.channel, int(order))
-                        if ok:
-                            await self.store.set_team(guild.id, team)
-                            await self.now_embed(guild, channel, team)
+
+                # ID가 있으면 역할/타순 없이 바로 연결하고, ID 없는 기존 곡만 예전 규칙을 유지한다.
+                song, order = select_auto_song(
+                    songs, lineup, member_id, member.display_name, has_legacy_role
+                )
+                if not song:
+                    continue
+                # after.channel이 이번 이벤트의 확정된 목적 통화방이다. member.voice 캐시를 다시 검사하지 않는다.
+                if guild.voice_client and guild.voice_client.channel and guild.voice_client.channel.id != after.channel.id:
+                    # 다른 방에서 사람이 사용 중이면 자동 등장곡 때문에 봇을 강제로 이동시키지 않는다.
+                    if any(not m.bot for m in guild.voice_client.channel.members):
                         return
+                ok = await self.player.play(guild, team, song, after.channel, order)
+                if ok:
+                    await self.store.set_team(guild.id, team)
+                    await self.now_embed(guild, channel, team)
+                return
         except (ValueError, VoiceError) as exc:
             await notify(channel, '❌ 자동 등장곡: ' + str(exc))
         except Exception:
