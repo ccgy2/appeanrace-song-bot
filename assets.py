@@ -2,6 +2,9 @@
 from __future__ import annotations
 import asyncio
 import json
+import hashlib
+import shutil
+import time
 import math
 import os
 from pathlib import Path
@@ -10,6 +13,7 @@ import subprocess
 import uuid
 from config import ROOT, Settings
 from validation import AUDIO_EXTENSIONS, EVENTS
+from persistence import require_upload_storage
 
 
 class Assets:
@@ -25,11 +29,24 @@ class Assets:
         meta = self.root / (asset_id + '.json')
         if not meta.is_file():
             raise ValueError('업로드 파일이 없습니다. 영구 저장소를 확인하거나 다시 업로드하세요.')
-        d = json.loads(meta.read_text(encoding='utf-8'))
-        path = (self.root / d['storedName']).resolve()
-        if path.parent != self.root.resolve() or not path.is_file():
-            raise ValueError('오디오 파일이 없거나 경로가 잘못됐습니다.')
-        return {**d, 'path': path}
+        try:
+            d = json.loads(meta.read_text(encoding='utf-8'))
+            if not isinstance(d, dict) or d.get('id') != asset_id:
+                raise ValueError
+            stored = d['storedName']
+            if not isinstance(stored, str) or Path(stored).stem != asset_id or Path(stored).suffix.lower() not in AUDIO_EXTENSIONS:
+                raise ValueError
+            duration = float(d['duration'])
+            if not math.isfinite(duration) or not 0 < duration <= 86400:
+                raise ValueError
+            path = (self.root / stored).resolve()
+            if path.parent != self.root.resolve() or not path.is_file():
+                raise ValueError
+            if path.stat().st_size != int(d['bytes']):
+                raise ValueError
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ValueError('오디오 파일이 없거나 손상됐습니다. 볼륨 경로/백업을 확인하거나 수정에서 원본을 다시 업로드하세요.') from None
+        return {**d, 'path': path, 'duration': duration}
 
     def _probe(self, path: Path) -> float:
         try:
@@ -49,6 +66,7 @@ class Assets:
             raise ValueError('정상적인 오디오 파일이 아니거나 검사 시간이 초과됐습니다.') from None
 
     async def upload(self, part) -> dict:
+        require_upload_storage(self.settings)
         name = (part.filename or '').replace('\\', '/').split('/')[-1][:180]
         ext = Path(name).suffix.lower()
         if ext not in AUDIO_EXTENSIONS:
@@ -56,11 +74,13 @@ class Assets:
         async with self.lock:
             used = sum(p.stat().st_size for p in self.root.iterdir() if p.is_file())
             limit = self.settings.max_upload_mb * 1024 * 1024
-            remaining = self.settings.max_storage_mb * 1024 * 1024 - used
+            remaining = min(self.settings.max_storage_mb * 1024 * 1024 - used,
+                            shutil.disk_usage(self.root).free - 8 * 1024 * 1024)
             asset_id = uuid.uuid4().hex
             path = self.root / (asset_id + ext)
             meta = self.root / (asset_id + '.json')
             size = 0
+            digest = hashlib.sha256()
             try:
                 with path.open('xb') as f:
                     while chunk := await part.read_chunk(size=64 * 1024):
@@ -69,12 +89,24 @@ class Assets:
                             raise ValueError(f'파일 하나당 최대 {self.settings.max_upload_mb}MB입니다.')
                         if size > remaining:
                             raise ValueError('업로드 저장 공간이 부족합니다. 관리자가 DATA_DIR 공간을 정리해야 합니다.')
+                        digest.update(chunk)
                         await asyncio.to_thread(f.write, chunk)
+                    await asyncio.to_thread(f.flush)
+                    await asyncio.to_thread(os.fsync, f.fileno())
                 duration = await asyncio.to_thread(self._probe, path)
-                result = {'id': asset_id, 'name': name, 'storedName': path.name, 'bytes': size, 'duration': duration}
+                result = {'id': asset_id, 'name': name, 'storedName': path.name, 'bytes': size, 'duration': duration, 'sha256': digest.hexdigest(), 'createdAt': int(time.time())}
                 temp = meta.with_suffix('.json.tmp')
-                temp.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+                with temp.open('w', encoding='utf-8') as f:
+                    f.write(json.dumps(result, ensure_ascii=False))
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(temp, meta)
+                if os.name == 'posix':
+                    fd = os.open(self.root, os.O_RDONLY)
+                    try:
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
                 return {k: v for k, v in result.items() if k != 'storedName'}
             except BaseException:
                 path.unlink(missing_ok=True)

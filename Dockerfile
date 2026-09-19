@@ -2,7 +2,7 @@
 FROM python:3.12-slim-bookworm
 COPY --from=denoland/deno:bin-2.9.7 /deno /usr/local/bin/deno
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    HOST=0.0.0.0 PORT=8080 DATA_DIR=/data \
+    HOST=0.0.0.0 PORT=8080 APP_DOCKER_DATA_DIR=/data \
     DENO_NO_UPDATE_CHECK=1 DENO_NO_PROMPT=1
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libopus0 ca-certificates \
     && rm -rf /var/lib/apt/lists/*

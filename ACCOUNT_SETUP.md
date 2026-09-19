@@ -1,22 +1,13 @@
-# 웹 회원/재생자 계정 설정
+# 계정 기능 — 이번 음악 라이브러리 업데이트
 
-- Firebase 웹: `https://appearance-song.web.app`
-- Railway API: `https://appeanrace-song-bot-production.up.railway.app`
-- 기본 관리자 아이디: `admin`
-- 최초 관리자 비밀번호: Railway Variables의 기존 `WEB_ADMIN_PASSWORD`
+기존 `webUsers` 데이터를 그대로 사용합니다. Firebase를 쓰면 기존 FIREBASE_SERVICE_ACCOUNT를 유지하고, 로컬 SQLite를 쓰면 같은 DATA_DIR와 영구 볼륨을 유지하세요.
 
-## 권한
-- `admin`: 모든 기능 + 재생자 관리
-- `player`: 곡/타순 조회, 통화방 연결·퇴장, 곡/타순/효과음 재생, 정지, 볼륨 조절
-- `pending`: 회원가입 직후 상태. 로그인 불가. 관리자가 승인해야 함.
+최초 기본 관리자 아이디는 `admin`, 최초 계정 생성 시의 비밀번호는 `WEB_ADMIN_PASSWORD`입니다. 이미 DB에 만들어진 admin 비밀번호를 이 업데이트가 초기화하지 않습니다. 계정 생성 후 Railway 비밀번호 변수만 바꾼다고 기존 계정의 해시가 자동 변경되는 방식은 아닙니다.
 
-## 사용 순서
-1. 봇 수정본을 기존 GitHub 저장소에 덮어쓰고 Railway 재배포.
-2. 웹사이트 수정본의 내용을 `G:\7. 디스코드 봇\appeanrace-song-bot-main\웹사이트`에 덮어쓰기. 기존 `.firebaserc`는 유지.
-3. 웹사이트 폴더에서 `firebase deploy --only hosting`.
-4. `https://appearance-song.web.app`에서 `admin` + 기존 WEB_ADMIN_PASSWORD로 로그인.
-5. 사용자는 회원가입. 관리자는 왼쪽 `재생자 관리`에서 `재생자로 승인`.
+일반 사용자는 회원가입 → 승인 대기 → 관리자 승인 후 로그인합니다. 재생자는 등장곡/응원가/상황별 노래의 등록·수정·파일 업로드·라이브러리 닉네임 변경과 재생을 할 수 있습니다. 삭제·팀/타순 변경·경기 사운드 연결 변경·회원관리·전체 백업은 관리자 전용입니다.
 
-계정은 봇이 사용하는 Firebase/Firestore에 `webUsers` 컬렉션으로 저장됩니다. 비밀번호 원문은 저장하지 않고 PBKDF2-SHA256 해시만 저장합니다.
+사용 중지/권한 변경/계정 삭제 시 기존 웹 세션을 무효화합니다. 로그아웃·서버 재시작 후 세션은 만료될 수 있지만, 곡/계정/오디오 데이터를 삭제하지 않습니다. 볼륨 없는 Railway 로컬 DB에는 승인된 사용자나 곡을 임시로 저장하지 않고 변경을 차단합니다. 관리자 로그인과 진단 열람은 가능합니다.
 
-주의: 최초 admin 계정이 생성된 뒤에는 Railway의 WEB_ADMIN_PASSWORD만 바꿔도 이미 생성된 admin 계정 비밀번호가 자동 변경되지는 않습니다.
+사이트 정적 HTML/CSS/JS는 공개지만 관리자 데이터/업로드/재생 API는 서버에서 인증합니다. 비밀키와 비밀번호를 웹 파일이나 GitHub에 넣지 마세요. 계정별 음악 소유권이나 Discord OAuth 로그인을 새로 추가한 버전은 아닙니다.
+
+배포와 저장소 설정: `MUSIC_LIBRARY_UPDATE.md`.

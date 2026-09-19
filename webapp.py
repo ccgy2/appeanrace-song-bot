@@ -1,6 +1,9 @@
 """봇과 같은 프로세스에서 실행하는 인증된 웹 관리 API."""
 from __future__ import annotations
 import hashlib
+import asyncio
+import tempfile
+from urllib.parse import quote
 import hmac
 import importlib.metadata
 import json
@@ -15,7 +18,9 @@ from collections import defaultdict, deque
 from pathlib import Path
 from aiohttp import web
 from config import ROOT, normalize_origin
-from validation import EVENTS, clean_name, validate_song
+from validation import EVENTS, clean_name, validate_song, song_category, SONG_CATEGORIES
+from persistence import storage_status
+from backups import write_music_backup
 
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
@@ -79,6 +84,8 @@ class WebPanel:
         self.sessions: dict[str, dict] = {}
         self.attempts: dict[str, deque] = defaultdict(deque)
         self.runner = None
+        self.backup_lock = asyncio.Lock()
+        self.account_lock = asyncio.Lock()
         self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
         self.app.add_routes([
             web.get('/', self.index),
@@ -104,6 +111,7 @@ class WebPanel:
             web.post('/api/control', self.control),
             web.get('/api/diagnostics', self.diagnostics),
             web.get('/api/export', self.export),
+            web.get('/api/backup', self.backup),
         ])
 
     def request_origin(self, request):
@@ -180,7 +188,7 @@ class WebPanel:
                 # 팀/타순/효과음/백업/회원 관리와 곡 삭제는 관리자 전용이다.
                 admin_only = (
                     request.path.startswith('/api/users')
-                    or request.path in {'/api/team', '/api/lineup', '/api/events', '/api/export'}
+                    or request.path in {'/api/team', '/api/lineup', '/api/events', '/api/export', '/api/backup'}
                     or (request.path == '/api/songs' and request.method == 'DELETE')
                 )
                 if admin_only and role != 'admin':
@@ -223,12 +231,16 @@ class WebPanel:
     async def connection(self, request):
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
-                         'authMode': 'bearer', 'web': 'ok', 'build': 'linked-20260919-1',
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'library-20260919-1',
+                         'capabilities': ['library-categories', 'atomic-rename', 'storage-check'],
                          'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only})
 
     async def _ensure_admin(self):
-        if self.s.web_password and await self.store.web_user('admin') is None:
-            await self.store.save_web_user('admin', {'passwordHash': password_hash(self.s.web_password), 'displayName':'관리자', 'role':'admin', 'enabled':True, 'createdAt':int(time.time())})
+        async with self.account_lock:
+            if self.s.web_password and await self.store.web_user('admin') is None:
+                hashed = await asyncio.to_thread(password_hash, self.s.web_password)
+                await self.store.save_web_user('admin', {'passwordHash': hashed, 'displayName':'관리자',
+                    'role':'admin', 'enabled':True, 'createdAt':int(time.time())})
 
     def _limit_login(self, request):
         now=time.monotonic(); ip=request.remote or 'unknown'; window=self.attempts[ip]
@@ -242,8 +254,10 @@ class WebPanel:
         if not USERNAME_RE.fullmatch(username) or username=='admin': raise ValueError('아이디는 영문 소문자, 숫자, _, -, . 조합 3~24자로 입력하세요.')
         if not 2<=len(display)<=30: raise ValueError('표시 이름은 2~30자로 입력하세요.')
         if not 10<=len(password)<=128: raise ValueError('비밀번호는 10자 이상으로 입력하세요.')
-        if await self.store.web_user(username): raise ValueError('이미 사용 중인 아이디입니다.')
-        await self.store.save_web_user(username, {'passwordHash':password_hash(password),'displayName':display,'role':'pending','enabled':True,'createdAt':int(time.time())})
+        async with self.account_lock:
+            if await self.store.web_user(username): raise ValueError('이미 사용 중인 아이디입니다.')
+            hashed = await asyncio.to_thread(password_hash, password)
+            await self.store.save_web_user(username, {'passwordHash':hashed,'displayName':display,'role':'pending','enabled':True,'createdAt':int(time.time())})
         return response({'ok':True,'message':'가입 신청 완료! 관리자가 재생자로 승인하면 로그인할 수 있습니다.'},201)
 
     async def login(self, request):
@@ -251,7 +265,7 @@ class WebPanel:
         mode=d.get('authMode','cookie'); username=str(d.get('username') or 'admin').strip().lower(); supplied=str(d.get('password',''))
         if mode not in {'cookie','bearer'}: raise ValueError('지원하지 않는 로그인 방식입니다.')
         user=await self.store.web_user(username)
-        if not user or not password_ok(supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
+        if not user or not await asyncio.to_thread(password_ok,supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
         if not user.get('enabled',True): raise web.HTTPForbidden(text='사용이 중지된 계정입니다.')
         if user.get('role')=='pending': raise web.HTTPForbidden(text='관리자 승인 대기 중입니다.')
         window.clear(); key,csrf=secrets.token_urlsafe(40),secrets.token_urlsafe(32)
@@ -270,7 +284,9 @@ class WebPanel:
         if not user: raise ValueError('계정을 찾을 수 없습니다.')
         d=await body(request); role=d.get('role',user.get('role','pending'))
         if role not in {'pending','player'}: raise ValueError('승인 대기 또는 재생자만 지정할 수 있습니다.')
-        await self.store.save_web_user(username,{'role':role,'enabled':bool(d.get('enabled',user.get('enabled',True)))},True); return response({'ok':True})
+        await self.store.save_web_user(username,{'role':role,'enabled':bool(d.get('enabled',user.get('enabled',True)))},True)
+        self.sessions = {k:v for k,v in self.sessions.items() if v.get('username') != username}
+        return response({'ok':True})
 
     async def remove_user(self, request):
         username=request.match_info['username'].strip().lower()
@@ -310,15 +326,18 @@ class WebPanel:
             teams.append(team)
         state = await self.store.state(team)
         events = {e['id']: e for e in await self.store.events(team)}
-        songs = await self.store.songs(team)
-        for song in songs:
-            if song.get('assetId'):
-                try:
-                    meta = self.assets.get(song['assetId'])
-                    song['filename'] = meta['name']
-                    song['fileDuration'] = meta['duration']
-                except ValueError:
-                    song['fileMissing'] = True
+        library = await self.store.library(team)
+        for songs in library.values():
+            for song in songs:
+                if song.get('assetId'):
+                    try:
+                        meta = await asyncio.to_thread(self.assets.get, song['assetId'])
+                        song['filename'] = meta['name']
+                        song['fileDuration'] = meta['duration']
+                    except (ValueError, OSError):
+                        # Preserve the record and ID. Never hide/delete a missing audio row.
+                        song['fileMissing'] = True
+        songs = library['entrance']
         channels = []
         if guild:
             for c in guild.voice_channels:
@@ -328,6 +347,7 @@ class WebPanel:
             'ready': self.bot.is_ready(), 'webOnly': self.s.web_only, 'storage': self.store.mode,
             'guilds': guilds, 'guildId': str(guild.id) if guild else None,
             'teams': teams, 'team': team, 'activeTeam': active, 'songs': songs,
+            'library': library, 'categories': SONG_CATEGORIES, 'fileStorage': storage_status(self.s),
             'lineup': await self.store.lineup(team), 'state': state, 'channels': channels,
             'voice': self.bot.player.voice.status(guild) if guild else None,
             'nowPlaying': self.bot.player.now.get(guild.id) if guild else None,
@@ -348,15 +368,38 @@ class WebPanel:
         data = await body(request)
         team = clean_name(data.get('team'), '팀 이름')
         song = validate_song(data)
+        old_name = clean_name(data['oldName']) if data.get('oldName') is not None else None
+        old = await self.store.song(team, old_name, song['category']) if old_name else None
+        warning = ''
         if song['source'] == 'upload':
-            meta = self.assets.get(song['assetId'])
-            if song['start'] >= meta['duration'] or song['end'] > meta['duration'] + .25:
-                raise ValueError(f'재생 구간이 파일 길이({meta["duration"]:.1f}초)를 초과합니다.')
-        await self.store.save_song(team, song)
-        return response({'ok': True})
+            try:
+                meta = await asyncio.to_thread(self.assets.get, song['assetId'])
+            except ValueError:
+                # Renaming a missing-file record must not force the user to lose its
+                # asset ID, nickname link or lineup. Playback still reports missing audio.
+                same_audio = old and all(old.get(k) == song.get(k) for k in ('source', 'assetId', 'start', 'end'))
+                if not same_audio:
+                    raise
+                warning = '이름/정보는 저장했습니다. 원본 오디오가 없어 재생하려면 파일을 다시 업로드해야 합니다.'
+            else:
+                if song['start'] >= meta['duration'] or song['end'] > meta['duration'] + .25:
+                    raise ValueError(f'재생 구간이 파일 길이({meta["duration"]:.1f}초)를 초과합니다.')
+        await self.store.save_song(team, song, old_name=old_name)
+        if old_name and old_name != song['name'] and song['category'] == 'entrance':
+            # Refresh existing Discord lineup messages; a display failure must not
+            # roll back or misreport a successfully committed nickname change.
+            if hasattr(self.bot, 'refresh_lineup'):
+                for guild in self.bot.guilds:
+                    if await self.store.get_team(guild.id) == team:
+                        try:
+                            await self.bot.refresh_lineup(guild)
+                        except Exception:
+                            log.warning('닉네임 변경 후 Discord 타순 표시 갱신 실패: guild=%s', guild.id)
+        return response({'ok': True, 'name': song['name'], 'category': song['category'], 'warning': warning})
 
     async def delete_song(self, request):
-        await self.store.delete_song(clean_name(request.query.get('team')), clean_name(request.query.get('name')))
+        await self.store.delete_song(clean_name(request.query.get('team')), clean_name(request.query.get('name')),
+                                     song_category(request.query.get('category', 'entrance')))
         return response({'ok': True})
 
     async def save_lineup(self, request):
@@ -380,7 +423,9 @@ class WebPanel:
     async def media(self, request):
         meta = self.assets.get(request.match_info['asset'])
         resp = web.FileResponse(meta['path'])
-        resp.headers['Content-Disposition'] = 'inline'
+        resp.headers['Content-Disposition'] = (
+            "attachment; filename*=UTF-8''" + quote(meta['name'], safe='')
+            if request.query.get('download') == '1' else 'inline')
         return resp
 
     async def event(self, request):
@@ -389,7 +434,12 @@ class WebPanel:
         if key not in EVENTS:
             raise ValueError('알 수 없는 효과음입니다.')
         asset = data.get('assetId')
-        if asset:
+        if data.get('songName'):
+            name = clean_name(data['songName'])
+            if not await self.store.song(team, name, 'situation'):
+                raise ValueError('상황별 노래 라이브러리에 먼저 곡을 등록하세요.')
+            await self.store.set_event(team, key, {'songName': name, 'category': 'situation'})
+        elif asset:
             meta = self.assets.get(str(asset))
             await self.store.set_event(team, key, {'assetId': meta['id'], 'filename': meta['name']})
         else:
@@ -415,7 +465,7 @@ class WebPanel:
         elif action == 'volume':
             await player.volume(guild, team, int(d.get('value', -1)))
         elif action == 'play':
-            song = await self.store.song(team, clean_name(d.get('name')))
+            song = await self.store.song(team, clean_name(d.get('name')), song_category(d.get('category', 'entrance')))
             if not song:
                 raise ValueError('등록된 곡이 없습니다.')
             await player.play(guild, team, song, channel=channel, preview=bool(d.get('preview')))
@@ -446,7 +496,7 @@ class WebPanel:
     async def diagnostics(self, request):
         return response({
             'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only,
-            'storage': self.store.mode,
+            'storage': self.store.mode, 'fileStorage': storage_status(self.s),
             'apiVersion': 2, 'authMode': request['session'].get('mode', 'cookie'),
             'publicUrl': self.s.public_url, 'webUrl': self.s.web_url,
             'webOrigins': list(self.s.web_origins),
@@ -467,7 +517,9 @@ class WebPanel:
                 '음성 연결은 UDP 송수신이 필요함. HTTP 포트만 열어서는 해결되지 않음',
                 'YouTube 링크 재생에는 Deno와 yt-dlp-ejs도 필요함. Docker 이미지에 포함',
                 'YouTube 차단은 음성 연결 오류와 별개. MP3 업로드로 구분 테스트',
-                '업로드 파일과 로컬 DB는 DATA_DIR 영구 저장소에 보관',
+                storage_status(self.s)['message'],
+                '기존에 유실된 오디오는 자동 복원되지 않음: 라이브러리 수정에서 원본 재업로드',
+                '자동 통화방 입장은 등장곡만 재생. 응원가·상황별 노래는 따로 재생',
             ],
         })
 
@@ -475,6 +527,25 @@ class WebPanel:
         resp = response(await self.store.export())
         resp.headers['Content-Disposition'] = 'attachment; filename="song-metadata-backup.json"'
         return resp
+
+    async def backup(self, request):
+        if self.backup_lock.locked():
+            raise web.HTTPTooManyRequests(text='백업을 생성 중입니다. 잠시 뒤 다시 시도하세요.')
+        async with self.backup_lock, self.assets.lock:
+            metadata = await self.store.export()
+            handle = tempfile.TemporaryFile(mode='w+b')
+            task = asyncio.create_task(asyncio.to_thread(write_music_backup, handle, self.assets, metadata))
+            try:
+                await asyncio.shield(task)
+                # aiohttp streams an IOBase payload and closes it on completion.
+                # TemporaryFile is unlinked automatically, and no password DB is copied.
+                resp = web.Response(body=handle, content_type='application/zip')
+                resp.headers['Content-Disposition'] = 'attachment; filename="appearance-music-backup.zip"'
+                return resp
+            except BaseException:
+                await asyncio.gather(task, return_exceptions=True)
+                handle.close()
+                raise
 
     async def start(self):
         self.runner = web.AppRunner(self.app, access_log=None)

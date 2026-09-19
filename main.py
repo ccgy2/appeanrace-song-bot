@@ -368,6 +368,40 @@ def install_commands(bot: AppearanceBot):
             await bot.now_embed(ctx.guild, ctx.channel, team)
         await bot.manage_idle(ctx.guild)
 
+    async def play_library_category(ctx, category: str, name: str):
+        team = await bot.store.get_team(ctx.guild.id)
+        song = await bot.store.song(team, clean_name(name), category)
+        if not song:
+            raise ValueError('이 종류에 등록된 곡이 없습니다. 웹 음악 라이브러리를 확인하세요.')
+        ok = await bot.player.play(ctx.guild, team, song, member_channel(ctx.author))
+        if ok:
+            await bot.now_embed(ctx.guild, ctx.channel, team)
+        await bot.manage_idle(ctx.guild)
+
+    @bot.command(name='응원가', aliases=['응원가재생'])
+    @manager()
+    async def play_cheer(ctx, *, name: str):
+        await play_library_category(ctx, 'cheer', name)
+
+    @bot.command(name='상황곡', aliases=['상황별노래'])
+    @manager()
+    async def play_situation(ctx, *, name: str):
+        await play_library_category(ctx, 'situation', name)
+
+    @bot.command(name='응원가저장')
+    @manager()
+    async def save_cheer(ctx, *, args: str):
+        song = {**parse_song_args(args), 'category': 'cheer'}
+        await bot.store.save_song(await bot.store.get_team(ctx.guild.id), song)
+        await ctx.send('✅ 응원가 저장: ' + song['name'])
+
+    @bot.command(name='상황곡저장')
+    @manager()
+    async def save_situation(ctx, *, args: str):
+        song = {**parse_song_args(args), 'category': 'situation'}
+        await bot.store.save_song(await bot.store.get_team(ctx.guild.id), song)
+        await ctx.send('✅ 상황별 노래 저장: ' + song['name'])
+
     @bot.command(name='타순', aliases=['교체'])
     @manager()
     async def order(ctx, num: int, *, args: str):
@@ -439,13 +473,15 @@ def install_commands(bot: AppearanceBot):
     async def panel(ctx):
         website = bot.settings.web_url or bot.settings.public_url
         if website:
-            await ctx.send('🌐 등장곡 관리: ' + website + '\n관리자 웹 비밀번호로 로그인하세요.')
+            await ctx.send('🌐 등장곡 관리: ' + website + '\n승인된 웹 계정 또는 admin 계정으로 로그인하세요.')
         else:
             await ctx.send('웹 서버가 실행 중인 PC에서 `http://localhost:8080`으로 접속하세요. PORT를 변경했다면 그 포트를 사용하세요. 외부 공개 주소는 PUBLIC_URL에 설정하세요.')
 
     @bot.command(name='진단')
     async def diagnosis(ctx):
         from webapp import version
+        from persistence import storage_status
+        files = storage_status(bot.settings)
         channel = member_channel(ctx.author)
         try:
             bot.player.voice.check_channel(ctx.guild, channel)
@@ -457,7 +493,8 @@ def install_commands(bot: AppearanceBot):
             f'🔎 discord.py {discord.__version__} / PyNaCl {version("PyNaCl")} / davey {version("davey")}\n'
             f'FFmpeg: {"설치됨" if shutil.which(bot.settings.ffmpeg) else "없음"} / 저장소: {bot.store.mode}\n'
             f'{permission}\n현재 연결: {st["channelName"] or "없음"} / 서버 음소거: {st["serverMuted"]}\n'
-            f'최근 연결 오류: {st["error"] or "없음"}'
+            f'최근 연결 오류: {st["error"] or "없음"}\n'
+            f'오디오 저장: {files["label"]}\n{files["message"]}'
         )
 
     @bot.command(name='도움', aliases=['help'])
@@ -467,7 +504,10 @@ def install_commands(bot: AppearanceBot):
             '`!입장` · `!퇴장` · `!정지` · `!진단` · `!웹`\n'
             '`!팀 팀명` · `!볼륨 0~100`\n'
             '`!저장 이름 / YouTube주소 / 0:10~0:40` (`!변경`도 가능)\n'
-            '`!미리듣기 이름` (5초) · `!재생 이름`\n'
+            '`!미리듣기 이름` (5초) · `!재생 이름` (등장곡)\n'
+            '`!응원가 이름` · `!상황곡 이름`\n'
+            '`!응원가저장 이름 / YouTube주소 / 0:00~1:00`\n'
+            '`!상황곡저장 이름 / YouTube주소 / 0:00~0:30`\n'
             '`!타순 1 / 이름` · `!교체 1 / 이름` · `!라인업`\n'
             '`!이벤트저장 키 파일명` (파일은 sounds 안에 있어야 함)\n'
             '`!등장곡역할주기 @유저` · `!등장곡역할회수 @유저` (관리자/OWNER_ID 전용)\n'

@@ -14,6 +14,16 @@ EVENTS = {
 }
 
 
+SONG_CATEGORIES = {'entrance': '등장곡', 'cheer': '응원가', 'situation': '상황별 노래'}
+SONG_COLLECTIONS = {'entrance': 'entranceSongs', 'cheer': 'cheerSongs', 'situation': 'situationSongs'}
+
+
+def song_category(value: object = 'entrance') -> str:
+    if not isinstance(value, str) or value not in SONG_CATEGORIES:
+        raise ValueError('곡 종류는 등장곡·응원가·상황별 노래 중에서 선택하세요.')
+    return value
+
+
 def clean_name(value: object, label: str = '이름') -> str:
     text = str(value or '').strip()
     if not 1 <= len(text) <= 64 or any(ord(c) < 32 for c in text):
@@ -82,10 +92,11 @@ def member_id(value: object) -> str:
 
 
 def validate_song(data: dict) -> dict:
-    name = clean_name(data.get('name'), '선수 이름')
+    category = song_category(data.get('category', 'entrance'))
+    name = clean_name(data.get('name'), '닉네임 / 곡 이름')
     a, b = time_range(data.get('start', 0), data.get('end', 30))
     source = data.get('source', 'youtube')
-    out = {'name': name, 'start': a, 'end': b, 'memberId': member_id(data.get('memberId')), 'source': source}
+    out = {'name': name, 'category': category, 'start': a, 'end': b, 'memberId': member_id(data.get('memberId')), 'source': source}
     if source == 'youtube':
         out['url'] = youtube_url(data.get('url'))
     elif source == 'upload':

@@ -10,6 +10,7 @@ def select_auto_song(songs: list[dict], lineup: dict[str, str], member_id: str,
       역할/타순/닉네임은 요구하지 않는다.
     - memberId가 없는 기존 데이터는 예전 규칙(등장곡 재생인 역할 + 타순 + 닉네임)을 유지한다.
     """
+    songs = [s for s in songs if s.get('category', 'entrance') == 'entrance']
     member_id = str(member_id or '')
     song = next((s for s in songs if str(s.get('memberId') or '') == member_id and member_id), None)
     if song:

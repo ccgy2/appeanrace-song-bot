@@ -12,13 +12,14 @@ import threading
 from pathlib import Path
 from typing import Any
 from config import Settings
-from validation import clean_name
+from validation import clean_name, song_category, SONG_COLLECTIONS, SONG_CATEGORIES
 
 log = logging.getLogger(__name__)
 
 
 class Store:
     def __init__(self, settings: Settings):
+        self.settings = settings
         self.lock = threading.RLock()
         self.db = None
         self.sql = None
@@ -55,7 +56,17 @@ class Store:
         row = self.sql.execute('SELECT body FROM docs WHERE path=?', (path,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def _require_persistent_local_write(self, path: str = ''):
+        if self.db is None and self.settings.on_railway and path != 'webUsers/admin':
+            from persistence import storage_status
+            report = storage_status(self.settings)
+            if not report['uploadsAllowed']:
+                raise ValueError('곡 정보/계정도 임시 디스크에만 저장되는 상태라 변경을 중단했습니다. ' + report['message'])
+
     def _write(self, path: str, body: dict, merge: bool = False):
+        # A bootstrap admin can still sign in to read the storage diagnostic.
+        # Other local records must never be acknowledged as saved on ephemeral Railway disk.
+        self._require_persistent_local_write(path)
         if self.db is not None:
             self.db.document(path).set(body, merge=merge, timeout=12)
         else:
@@ -73,6 +84,7 @@ class Store:
         return [{'id': p[len(prefix):], **json.loads(b)} for p, b in rows if '/' not in p[len(prefix):]]
 
     def _apply(self, writes: list[tuple[str, dict | None]]):
+        self._require_persistent_local_write()
         if self.db is not None:
             batch = self.db.batch()
             for path, body in writes:
@@ -117,28 +129,67 @@ class Store:
         await self.create_team(team)
         await self._run(self._write, f'guilds/{guild_id}', {'team': team}, True)
 
-    async def songs(self, team: str) -> list[dict]:
-        rows = await self._run(self._list, f'teams/{clean_name(team)}/entranceSongs')
-        return sorted([{'source': 'youtube', **d, 'name': d['id']} for d in rows], key=lambda d: d['name'])
+    async def songs(self, team: str, category: str = 'entrance') -> list[dict]:
+        category = song_category(category)
+        rows = await self._run(self._list, f'teams/{clean_name(team)}/{SONG_COLLECTIONS[category]}')
+        return sorted([{'source': 'youtube', **d, 'name': d['id'], 'category': category} for d in rows], key=lambda d: d['name'])
 
-    async def song(self, team: str, name: str) -> dict | None:
-        d = await self._run(self._read, f'teams/{clean_name(team)}/entranceSongs/{clean_name(name)}')
-        return {'source': 'youtube', **d, 'name': name} if d is not None else None
+    async def library(self, team: str) -> dict[str, list[dict]]:
+        return {category: await self.songs(team, category) for category in SONG_CATEGORIES}
 
-    async def save_song(self, team: str, song: dict):
+    async def song(self, team: str, name: str, category: str = 'entrance') -> dict | None:
+        category, name = song_category(category), clean_name(name)
+        d = await self._run(self._read, f'teams/{clean_name(team)}/{SONG_COLLECTIONS[category]}/{name}')
+        return {'source': 'youtube', **d, 'name': name, 'category': category} if d is not None else None
+
+    def _song_reference_writes(self, root: str, category: str, old: str, new: str | None):
+        """Run under the same store lock/atomic batch as the song rename/delete."""
+        writes = []
+        if category == 'entrance':
+            for row in self._list(f'{root}/lineup'):
+                if row.get('name') == old:
+                    data = {k: v for k, v in row.items() if k != 'id'}
+                    data['name'] = new
+                    writes.append((f'{root}/lineup/{row["id"]}', data if new else None))
+        if category == 'situation':
+            for row in self._list(f'{root}/events'):
+                if row.get('songName') == old and row.get('category') == 'situation':
+                    data = {k: v for k, v in row.items() if k != 'id'}
+                    data['songName'] = new
+                    writes.append((f'{root}/events/{row["id"]}', data if new else None))
+        return writes
+
+    async def save_song(self, team: str, song: dict, *, old_name: str | None = None):
+        team, name = clean_name(team), clean_name(song['name'])
+        category = song_category(song.get('category', 'entrance'))
+        old = clean_name(old_name) if old_name is not None else None
         await self.create_team(team)
-        name = clean_name(song['name'])
-        body = {k: v for k, v in song.items() if k not in {'name', 'id'}}
-        await self._run(self._write, f'teams/{clean_name(team)}/entranceSongs/{name}', body)
-
-    async def delete_song(self, team: str, name: str):
-        prefix = f'teams/{clean_name(team)}'
-        name = clean_name(name)
         def work():
-            writes = [(f'{prefix}/entranceSongs/{name}', None)]
-            for row in self._list(f'{prefix}/lineup'):
-                if row.get('name') == name:
-                    writes.append((f'{prefix}/lineup/{row["id"]}', None))
+            root = f'teams/{team}'
+            prefix = f'{root}/{SONG_COLLECTIONS[category]}'
+            previous = self._read(f'{prefix}/{old or name}')
+            if old is not None and previous is None:
+                raise ValueError('수정할 곡이 없습니다. 다른 사용자가 이름을 바꾸거나 삭제했을 수 있습니다. 새로고침하세요.')
+            if old is not None and old != name and self._read(f'{prefix}/{name}') is not None:
+                raise ValueError('같은 종류에 새 닉네임 / 이름의 곡이 이미 있습니다. 다른 이름을 입력하세요.')
+            data = {**(previous or {}), **{k: v for k, v in song.items() if k not in {'name', 'id', 'category'}}}
+            if data.get('source', 'youtube') == 'youtube':
+                data.pop('assetId', None)
+            else:
+                data.pop('url', None)
+            writes = [(f'{prefix}/{name}', data)]
+            if old is not None and old != name:
+                writes.append((f'{prefix}/{old}', None))
+                writes.extend(self._song_reference_writes(root, category, old, name))
+            self._apply(writes)
+        await self._run(work)
+
+    async def delete_song(self, team: str, name: str, category: str = 'entrance'):
+        root = f'teams/{clean_name(team)}'
+        category, name = song_category(category), clean_name(name)
+        def work():
+            writes = [(f'{root}/{SONG_COLLECTIONS[category]}/{name}', None)]
+            writes.extend(self._song_reference_writes(root, category, name, None))
             self._apply(writes)
         await self._run(work)
 
@@ -173,24 +224,22 @@ class Store:
             raise ValueError('타순은 1~9번입니다.')
         await self._run(self._write, f'teams/{clean_name(team)}/state/game', {'currentOrder': value}, True)
 
-    async def rename(self, team: str, old: str, new: str):
+    async def rename(self, team: str, old: str, new: str, category: str = 'entrance'):
         team, old, new = clean_name(team), clean_name(old), clean_name(new)
+        category = song_category(category)
         if old == new:
             raise ValueError('기존 이름과 새 이름이 같습니다.')
         def work():
             root = f'teams/{team}'
-            if self._read(f'{root}/entranceSongs/{new}') is not None:
-                raise ValueError('새 이름의 등장곡이 이미 있습니다.')
-            song = self._read(f'{root}/entranceSongs/{old}')
-            lineup = self._list(f'{root}/lineup')
-            writes = []
+            prefix = f'{root}/{SONG_COLLECTIONS[category]}'
+            if self._read(f'{prefix}/{new}') is not None:
+                raise ValueError('같은 종류에 새 이름의 곡이 이미 있습니다.')
+            song = self._read(f'{prefix}/{old}')
+            writes = self._song_reference_writes(root, category, old, new)
             if song is not None:
-                writes += [(f'{root}/entranceSongs/{new}', song), (f'{root}/entranceSongs/{old}', None)]
-            for d in lineup:
-                if d.get('name') == old:
-                    writes.append((f'{root}/lineup/{d["id"]}', {'name': new}))
+                writes += [(f'{prefix}/{new}', song), (f'{prefix}/{old}', None)]
             if not writes:
-                raise ValueError('기존 이름의 등장곡/타순이 없습니다.')
+                raise ValueError('기존 이름의 곡/타순이 없습니다.')
             self._apply(writes)
         await self._run(work)
 
@@ -205,9 +254,11 @@ class Store:
         await self._run(self._apply, [(f'teams/{clean_name(team)}/events/{clean_name(key)}', data)])
 
     async def export(self) -> dict:
-        result = {'schema': 1, 'note': '오디오 파일은 별도로 DATA_DIR 전체를 백업하세요.', 'teams': {}}
+        result = {'schema': 2, 'note': 'JSON에는 오디오가 없습니다. 오디오 포함 ZIP 백업도 내려받으세요.', 'teams': {}}
         for name in await self.teams():
-            result['teams'][name] = {'songs': await self.songs(name), 'lineup': await self.lineup(name), 'state': await self.state(name), 'events': await self.events(name)}
+            library = await self.library(name)
+            result['teams'][name] = {'songs': library['entrance'], 'library': library,
+                'lineup': await self.lineup(name), 'state': await self.state(name), 'events': await self.events(name)}
         return result
 
 

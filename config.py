@@ -90,6 +90,8 @@ class Settings:
     cookies_path: str = ''
     cookies_b64: str = ''
     enable_members_intent: bool = False
+    on_railway: bool = False
+    volume_path: Path | None = None
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -112,12 +114,22 @@ class Settings:
                     origin = normalize_origin(item, 'WEB_ORIGINS')
                     if origin not in origins:
                         origins.append(origin)
-        data_dir = Path(os.getenv('DATA_DIR', str(ROOT / 'data'))).expanduser().resolve()
+        volume_raw = os.getenv('RAILWAY_VOLUME_MOUNT_PATH', '').strip()
+        volume_path = Path(volume_raw).expanduser().resolve() if volume_raw else None
+        # Keep explicit DATA_DIR (no silent data migration). Otherwise use the
+        # Railway-provided volume path before the container/local default.
+        fallback = volume_raw or os.getenv('APP_DOCKER_DATA_DIR', '').strip() or str(ROOT / 'data')
+        data_dir = Path(os.getenv('DATA_DIR', '').strip() or fallback).expanduser().resolve()
+        on_railway = bool(volume_raw or any(os.getenv(k) for k in (
+            'RAILWAY_ENVIRONMENT_ID', 'RAILWAY_PROJECT_ID', 'RAILWAY_SERVICE_ID', 'RAILWAY_PUBLIC_DOMAIN')))
+
         s = cls(
             token=os.getenv('DISCORD_TOKEN', '').strip(),
             firebase_key=os.getenv('FIREBASE_SERVICE_ACCOUNT', '').strip(),
             owner_id=int(os.getenv('OWNER_ID', '0') or 0),
             data_dir=data_dir,
+            on_railway=on_railway,
+            volume_path=volume_path,
             host=os.getenv('HOST', '0.0.0.0'),
             port=int(os.getenv('PORT', '8080')),
             web_password=os.getenv('WEB_ADMIN_PASSWORD', ''),
@@ -147,4 +159,9 @@ class Settings:
         if url and not url.startswith(('https://', 'http://')):
             raise ValueError('PUBLIC_URL은 http:// 또는 https://로 시작해야 합니다.')
         s.data_dir.mkdir(parents=True, exist_ok=True)
+        from persistence import storage_status
+        report = storage_status(s)
+        logger = logging.getLogger(__name__)
+        (logger.warning if report['status'] == 'unsafe' else logger.info)(
+            '음원 저장소: %s | DATA_DIR=%s | %s', report['label'], s.data_dir, report['message'])
         return s

@@ -165,6 +165,13 @@ class Player:
         self.generation[guild.id] += 1
         generation = self.generation[guild.id]
         custom = await self.store.event(team, key)
+        if custom and custom.get('songName') and custom.get('category') == 'situation':
+            song = await self.store.song(team, custom['songName'], 'situation')
+            if not song:
+                raise ValueError('연결된 상황별 노래가 없습니다. 경기 사운드에서 다시 선택하세요.')
+            if generation != self.generation[guild.id]:
+                return False
+            return await self.play(guild, team, song, channel=channel)
         if custom and custom.get('assetId'):
             path = self.assets.get(custom['assetId'])['path']
         elif custom and custom.get('file'):
