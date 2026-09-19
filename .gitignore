@@ -15,3 +15,12 @@ uploads/
 *.pem
 *.key
 .DS_Store
+
+.firebase/
+node_modules/
+.deploy-backups/
+*debug.log
+serviceAccountKey.json
+firebase-service-account.json
+
+test-output/
