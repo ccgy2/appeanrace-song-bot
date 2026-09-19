@@ -80,7 +80,7 @@ class LinkedConfigurationTests(unittest.TestCase):
         self.assertIn("connect-src 'self' "+BACK+';',csp)
         self.assertNotIn('*.up.railway.app',csp)
         self.assertNotIn('id="railway-url"',(ROOT/'static/index.html').read_text())
-        self.assertNotIn('localStorage.getItem',(ROOT/'static/app.js').read_text())
+        self.assertIn("sessionStorage.setItem(tokenKey(), token)",(ROOT/'static/app.js').read_text())
 
 class LinkedAPIRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -156,7 +156,7 @@ class LinkedAPIRegressionTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/connection',headers={'Origin':FRONT})
         self.assertEqual(r.status,200)
         d=await r.json()
-        self.assertEqual(d['build'],'linked-20260919-1')
+        self.assertEqual(d['build'],'library-20260919-1')
         for forbidden in ['accessToken','password','songs','guilds','firebase_key']:
             self.assertNotIn(forbidden,d)
         for path in ['/.env','/deployment-link.json','/config.py','/webapp.py']:
