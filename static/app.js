@@ -3,7 +3,9 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 let csrf = '', state = null, selectedTeam = '', selectedGuild = '';
 let source = 'youtube', assetId = '', uploading = false, toastTimer, previewAudio;
-let stateTicket = 0, uploadTicket = 0;
+let stateTicket = 0, uploadTicket = 0, previewTicket = 0;
+let accessToken = '', apiBase = '', configError = '';
+const mediaUrls = new Map();
 const statusNames = {preparing:'오디오 준비 중',playing:'재생 중',finished:'재생 완료',stopped:'정지됨',error:'재생 오류'};
 
 function el(tag, text, cls) {
@@ -18,23 +20,110 @@ function toast(message, error = false) {
   node.classList.toggle('error', error); node.hidden = false;
   toastTimer = setTimeout(() => { node.hidden = true; }, error ? 10000 : 4500);
 }
-function showLogin() {
-  csrf = ''; $('#app').hidden = true; $('#login-screen').hidden = false;
-  if (previewAudio) previewAudio.pause();
+function tokenKey() { return 'appearance:session:v2:' + (apiBase || location.origin); }
+function normalizeApiBase(raw) {
+  const u = new URL(String(raw || '').trim());
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+  if ((u.protocol !== 'https:' && !(local && u.protocol === 'http:')) || u.username || u.password || (u.pathname !== '/' && u.pathname !== '') || u.search || u.hash) throw new Error('Railway 주소는 경로 없는 HTTPS 주소여야 합니다.');
+  if (location.protocol === 'https:' && u.protocol !== 'https:') throw new Error('Firebase에서는 HTTPS Railway 주소만 사용할 수 있습니다.');
+  if (location.hostname === 'appearance-song.web.app' && !u.hostname.endsWith('.up.railway.app')) throw new Error('Railway의 Public Networking 주소(…up.railway.app)를 입력하세요.');
+  return u.origin;
 }
-async function api(path, method = 'GET', data) {
-  const options = {method, credentials:'same-origin', headers:{}};
-  if (method !== 'GET') options.headers['X-CSRF-Token'] = csrf;
+function rememberToken(token) {
+  accessToken = token;
+  try { if (token) sessionStorage.setItem(tokenKey(), token); else sessionStorage.removeItem(tokenKey()); } catch { /* Memory-only in restricted browsers. */ }
+}
+function releaseAudio(audio) {
+  if (!audio) return;
+  audio.pause(); audio.removeAttribute('src');
+  const previous = mediaUrls.get(audio);
+  if (previous) { URL.revokeObjectURL(previous); mediaUrls.delete(audio); }
+}
+function clearMedia() { for (const audio of Array.from(mediaUrls.keys())) releaseAudio(audio); }
+function showLogin() {
+  csrf = ''; state = null; stateTicket++; previewTicket++; uploadTicket++;
+  rememberToken(''); clearMedia();
+  $('#app').hidden = true; $('#login-screen').hidden = false;
+  $('#password').value = '';
+  resetEditor();
+}
+function apiUrl(path) {
+  if (configError) throw new Error(configError);
+  if (!path.startsWith('/api/') && path !== '/healthz') throw new Error('잘못된 API 경로입니다.');
+  return apiBase + path;
+}
+function configureClient() {
+  configError = '';
+  try {
+    const configured = String(window.APPEARANCE_CONFIG?.API_BASE_URL || '').trim();
+    const raw = configured;
+    if (raw) apiBase = normalizeApiBase(raw);
+    else if (/\.(web\.app|firebaseapp\.com)$/.test(location.hostname)) configError = '웹 연결 설정이 비어 있습니다. 최신 웹사이트 파일로 다시 배포하세요.';
+    else if (!['http:', 'https:'].includes(location.protocol)) configError = '파일을 직접 열지 말고 Firebase Hosting 또는 로컬 웹 서버로 접속하세요.';
+  } catch (err) {
+    configError = err.message || 'Railway 공개 HTTPS 주소를 확인하세요.';
+    apiBase = '';
+  }
+  try { accessToken = sessionStorage.getItem(tokenKey()) || ''; } catch { accessToken = ''; }
+  $('#server-address').textContent = configError ? '봇 서버 주소 설정 필요' : (apiBase || location.origin);
+}
+
+async function request(path, method = 'GET', data, asBlob = false) {
+  const options = {method, credentials:'omit', cache:'no-store', headers:{}};
+  if (accessToken && path !== '/api/login' && path !== '/api/connection') options.headers.Authorization = 'Bearer ' + accessToken;
+  if (!['GET','HEAD'].includes(method) && csrf) options.headers['X-CSRF-Token'] = csrf;
   if (data !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(data); }
   let res;
-  try { res = await fetch(path, options); } catch { throw new Error('서버에 연결하지 못했습니다. 봇 실행 상태와 인터넷 연결을 확인하세요.'); }
-  let result;
-  try { result = await res.json(); } catch { throw new Error('서버가 정상 응답을 보내지 않았습니다. 호스팅 실행 로그를 확인하세요.'); }
+  const url = apiUrl(path);
+  const controller = new AbortController(); options.signal = controller.signal;
+  const timer = setTimeout(()=>controller.abort(), asBlob ? 180000 : (path==='/api/connection' ? 15000 : 60000));
+  try { res = await fetch(url, options); } catch (err) {
+    throw new Error(err.name==='AbortError' ? '요청 시간이 초과됐습니다. 등록·재생은 처리됐을 수도 있으니 상태를 확인한 뒤 다시 시도하세요.' : 'Railway에 연결하지 못했습니다. 서버 실행 상태·공개 주소·WEB_ORIGINS에 현재 웹 주소가 등록됐는지 확인하세요.');
+  } finally { clearTimeout(timer); }
   if (!res.ok) {
+    let result; try { result = await res.json(); } catch { result = {}; }
     if (res.status === 401 && path !== '/api/login') showLogin();
-    throw new Error(result.error || `요청 실패 (${res.status})`);
+    throw new Error(result.error || `요청 실패 (${res.status}). Railway 실행 로그를 확인하세요.`);
   }
-  return result;
+  if (asBlob) return res.blob();
+  try { return await res.json(); } catch { throw new Error('봇 API가 아닌 페이지가 응답했습니다. config.js의 Railway 주소와 새 서버 코드 배포 여부를 확인하세요.'); }
+}
+async function api(path, method = 'GET', data) { return request(path, method, data); }
+async function checkConnection() {
+  const node = $('#connection-status'), help = $('#connection-help');
+  node.textContent = '연결 확인 중…'; node.className = ''; help.hidden = true;
+  try {
+    const r = await api('/api/connection');
+    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2) throw new Error('Railway 봇 서버의 새 버전이 아닙니다. 이번 수정본 전체를 다시 배포하세요.');
+    node.textContent = r.discordReady ? '웹 연결 정상 · 봇 온라인' : '웹 연결 정상 · 봇 미연결';
+    node.className = 'success';
+    if (!r.discordReady) { help.textContent = r.webOnly ? '현재 WEB_ONLY=true입니다. Railway에서 false로 바꾸세요.' : '웹 API는 연결됐습니다. Discord 토큰·봇 실행 로그를 확인하세요.'; help.hidden = false; }
+    return true;
+  } catch (err) {
+    node.textContent = '연결 확인 필요'; node.className = 'error'; help.textContent = err.message; help.hidden = false;
+    return false;
+  }
+}
+async function attachMedia(audio, id) {
+  // <audio src> cannot attach Authorization headers. Fetch privately, then use a blob URL.
+  const blob = await request('/api/media/' + encodeURIComponent(id), 'GET', undefined, true);
+  if (!csrf || !audio.isConnected) return false;
+  releaseAudio(audio);
+  const url = URL.createObjectURL(blob); mediaUrls.set(audio, url);
+  audio.src = url; audio.hidden = false;
+  return true;
+}
+async function loadEditorPreview(id, ticket) {
+  const blob = await request('/api/media/' + encodeURIComponent(id), 'GET', undefined, true);
+  if (ticket !== uploadTicket || !csrf) return;
+  const audio = $('#upload-preview'); releaseAudio(audio);
+  const url = URL.createObjectURL(blob); mediaUrls.set(audio, url); audio.src = url; audio.hidden = false;
+}
+async function exportBackup() {
+  const blob = await request('/api/export', 'GET', undefined, true);
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = 'song-metadata-backup.json'; document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 async function run(button, fn) {
   if (button?.disabled) return;
@@ -85,10 +174,10 @@ function resetEditor() {
   $('#save-song').textContent = '＋ 등장곡 저장'; $('#save-song').disabled = false;
   $('#song-file').disabled = false; $('#upload-name').textContent = '선택된 파일 없음';
   $('#upload-progress').hidden = true;
-  const audio = $('#upload-preview'); audio.pause(); audio.removeAttribute('src'); audio.hidden = true;
+  const audio = $('#upload-preview'); releaseAudio(audio); audio.hidden = true;
   setSource('youtube');
 }
-function editSong(song) {
+async function editSong(song) {
   resetEditor();
   $('#song-name').value = song.name; $('#song-name').readOnly = true;
   $('#song-url').value = song.url || ''; $('#song-start').value = fmt(song.start); $('#song-end').value = fmt(song.end);
@@ -97,7 +186,7 @@ function editSong(song) {
   $('#editor-title').textContent = '등장곡 수정'; $('#save-song').textContent = '변경 내용 저장';
   if (assetId) {
     $('#upload-name').textContent = song.fileMissing ? '파일 없음 · 다시 업로드하세요' : (song.filename || '등록된 오디오');
-    if (!song.fileMissing) { $('#upload-preview').src = '/api/media/' + assetId; $('#upload-preview').hidden = false; }
+    if (!song.fileMissing) await loadEditorPreview(assetId, uploadTicket);
   }
   $('#song-form').scrollIntoView({behavior:'smooth', block:'center'});
 }
@@ -106,7 +195,9 @@ async function uploadFile(file, onProgress) {
   const limit = (state?.maxUploadMb || 25) * 1024 * 1024;
   if (file.size > limit) throw new Error(`파일은 최대 ${state?.maxUploadMb || 25}MB입니다.`);
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest(); xhr.open('POST','/api/upload'); xhr.timeout = 180000;
+    const xhr = new XMLHttpRequest(); xhr.open('POST',apiUrl('/api/upload')); xhr.timeout = 180000;
+    xhr.withCredentials = false;
+    xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
     xhr.setRequestHeader('X-CSRF-Token', csrf);
     xhr.upload.onprogress = (e) => { if (onProgress && e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100)); };
     xhr.onerror = () => reject(new Error('업로드 연결이 끊겼습니다. 다시 시도하세요.'));
@@ -131,7 +222,8 @@ async function selectSongFile(file) {
     if (ticket !== uploadTicket) return;
     assetId = result.id;
     $('#upload-name').textContent = `${result.name} · ${fmt(result.duration)}`;
-    $('#upload-preview').src = '/api/media/' + assetId; $('#upload-preview').hidden = false;
+    await loadEditorPreview(assetId, ticket);
+    if (ticket !== uploadTicket) return;
     $('#song-start').value = '0:00'; $('#song-end').value = fmt(Math.min(30, Math.floor(result.duration * 100) / 100));
     if (!$('#song-name').value) $('#song-name').value = file.name.replace(/\.[^.]+$/, '').slice(0,64);
     toast('파일 업로드 완료! 재생 구간을 확인하고 등장곡을 저장하세요.');
@@ -181,7 +273,9 @@ async function loadState(full = true) {
   renderSongs(); renderLineup(); renderEvents();
 }
 function renderSongs() {
-  const list = $('#song-list'); list.replaceChildren();
+  const list = $('#song-list');
+  list.querySelectorAll('audio').forEach(releaseAudio); previewTicket++;
+  list.replaceChildren();
   if (!state) return;
   const query = $('#search').value.trim().toLocaleLowerCase();
   $('#song-count').textContent = state.songs.length;
@@ -205,9 +299,12 @@ function renderSongs() {
     actions.append(bindButton('수정','ghost',()=>editSong(song)));
     if (song.source === 'upload' && !song.fileMissing) {
       actions.append(bindButton('내 기기에서 듣기','ghost',async()=>{
-        if (previewAudio) previewAudio.pause();
+        const ticket = ++previewTicket;
+        if (previewAudio) releaseAudio(previewAudio);
         let audio = row.querySelector('audio');
-        if (!audio) { audio = el('audio'); audio.controls=true; audio.preload='metadata'; audio.src='/api/media/'+song.assetId; row.append(audio); }
+        if (!audio) { audio = el('audio'); audio.controls=true; audio.preload='metadata'; row.append(audio); }
+        if (!await attachMedia(audio, song.assetId)) return;
+        if (ticket !== previewTicket) { releaseAudio(audio); return; }
         audio.currentTime = Number(song.start)||0;
         audio.ontimeupdate = ()=>{ if (audio.currentTime >= Number(song.end)) audio.pause(); };
         previewAudio=audio; await audio.play();
@@ -266,7 +363,7 @@ function renderEvents() {
 async function diagnostics() {
   const d=await api('/api/diagnostics');
   const values=$('#diagnostic-values'); values.replaceChildren();
-  const rows=[['Discord 연결',d.discordReady?'연결됨':'미연결'],['실행 모드',d.webOnly?'웹 확인 모드':'봇 + 웹'],['저장소',d.storage==='firebase'?'Firebase':'로컬 SQLite'],['FFmpeg',d.ffmpeg?'설치됨':'미설치'],['ffprobe',d.ffprobe?'설치됨':'미설치'],['Deno',d.deno?'설치됨':'미설치'],...Object.entries(d.packages),['YouTube 쿠키',d.cookiesConfigured?'설정됨':'미설정'],['HTTPS 전용 쿠키',d.secureCookie?'사용':'로컬 HTTP 허용'],['업로드 제한',`${d.maxUploadMb}MB/파일 · 총 ${d.maxStorageMb}MB`]];
+  const rows=[['Discord 연결',d.discordReady?'연결됨':'미연결'],['실행 모드',d.webOnly?'웹 확인 모드':'봇 + 웹'],['저장소',d.storage==='firebase'?'Firebase':'로컬 SQLite'],['FFmpeg',d.ffmpeg?'설치됨':'미설치'],['ffprobe',d.ffprobe?'설치됨':'미설치'],['Deno',d.deno?'설치됨':'미설치'],...Object.entries(d.packages),['YouTube 쿠키',d.cookiesConfigured?'설정됨':'미설정'],['웹 인증',d.authMode==='bearer'?'로그인 토큰 (교차 사이트 쿠키 불필요)':'같은 사이트 쿠키'],['Railway API',apiBase || location.origin],['Firebase 웹',d.webUrl || 'WEB_URL 미설정'],['허용된 웹 주소',(d.webOrigins || []).join(', ') || '같은 주소에서만 허용'],['업로드 제한',`${d.maxUploadMb}MB/파일 · 총 ${d.maxStorageMb}MB`]];
   for (const [k,v] of rows) { const row=el('div',null,'diagnostic-row'), strong=el('strong',v); if(['미설치','미연결'].includes(v))strong.classList.add('warn');row.append(el('span',k),strong);values.append(row); }
   const checks=$('#diagnostic-checks'); checks.replaceChildren();
   for(const text of d.checks){const row=el('div',null,'check-item');row.append(el('span','✓'),el('p',text));checks.append(row);}
@@ -279,7 +376,7 @@ function setTab(name) {
 }
 $('#login-form').addEventListener('submit',async e=>{
   e.preventDefault();const b=e.submitter;b.disabled=true;$('#login-error').textContent='';
-  try{const r=await api('/api/login','POST',{password:$('#password').value});csrf=r.csrf;$('#password').value='';$('#login-screen').hidden=true;$('#app').hidden=false;await loadState();}
+  try{const r=await api('/api/login','POST',{password:$('#password').value,authMode:'bearer'});if(!r.accessToken)throw new Error('Railway 서버 코드를 이번 버전으로 교체하세요.');rememberToken(r.accessToken);csrf=r.csrf;$('#password').value='';$('#login-screen').hidden=true;$('#app').hidden=false;await loadState();}
   catch(err){$('#login-error').textContent=err.message;}finally{b.disabled=false;}
 });
 for (const id of ['logout', 'logout-mobile']) $('#' + id).addEventListener('click',()=>run($('#' + id),async()=>{await api('/api/logout','POST',{});showLogin();}));
@@ -316,6 +413,15 @@ $('#next-player').addEventListener('click',()=>run($('#next-player'),()=>control
 $('#volume').addEventListener('input',()=>{$('#volume-value').textContent=$('#volume').value+'%';});
 $('#volume').addEventListener('change',()=>run(null,()=>control('volume',{value:Number($('#volume').value)})));
 $('#save-lineup').addEventListener('click',()=>run($('#save-lineup'),async()=>{const lineup={};$$('#lineup-grid select').forEach(s=>{lineup[s.dataset.order]=s.value;});await api('/api/lineup','PUT',{team:selectedTeam,lineup});await loadState();toast('타순을 저장했습니다.');}));
+$('#check-connection').addEventListener('click',()=>run($('#check-connection'),checkConnection));
+$('#export-backup').addEventListener('click',()=>run($('#export-backup'),exportBackup));
+window.addEventListener('pagehide',clearMedia);
 $('#reload-diagnostics').addEventListener('click',()=>run($('#reload-diagnostics'),diagnostics));
 setInterval(()=>{if(csrf && !document.hidden)loadState(false).catch(err=>{if(csrf)toast(err.message,true);});},15000);
-(async()=>{try{const r=await api('/api/session');csrf=r.csrf;$('#login-screen').hidden=true;$('#app').hidden=false;await loadState();}catch(err){if(csrf)toast(err.message,true);else showLogin();}})();
+configureClient();
+(async()=>{
+  const connected=await checkConnection();
+  if(!connected || !accessToken)return;
+  try{const r=await api('/api/session');csrf=r.csrf;$('#login-screen').hidden=true;$('#app').hidden=false;await loadState();}
+  catch(err){if(csrf)toast(err.message,true);else showLogin();}
+})();

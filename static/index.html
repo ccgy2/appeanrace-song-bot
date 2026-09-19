@@ -3,15 +3,16 @@
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#10141e"><title>APPEARANCE · 등장곡 스튜디오</title>
-<link rel="icon" href="data:,"><link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script>
+<link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script src="/config.js" defer></script><script src="/app.js" defer></script>
 </head>
 <body>
 <div id="login-screen" class="login-screen">
   <section class="login-card">
     <div class="brand-mark">A<span>♪</span></div><p class="eyebrow">APPEARANCE STUDIO</p>
     <h1>등장하는 순간,<br>음악이 시작되도록.</h1><p class="muted">우리 팀의 등장곡과 경기 사운드를<br>한 곳에서 관리하세요.</p>
+    <section class="server-connection" aria-label="봇 서버 연결 상태"><span class="eyebrow">FIREBASE ↔ RAILWAY</span><p class="tiny" id="firebase-address">웹: https://appearance-song.web.app</p><p class="tiny" id="server-address"></p><div class="connection-line"><span id="connection-status" role="status">연결 확인 중…</span><button id="check-connection" type="button" class="ghost">연결 확인</button></div><p class="tiny" id="connection-help" hidden></p></section>
     <form id="login-form"><label for="password">관리자 비밀번호</label><input id="password" type="password" autocomplete="current-password" placeholder="웹 관리자 비밀번호" required minlength="12"><button class="primary wide" type="submit">스튜디오 열기 <span>→</span></button><p id="login-error" class="error-text" role="alert"></p></form>
-    <p class="tiny">Discord 토큰이 아니라 WEB_ADMIN_PASSWORD에 설정한 비밀번호입니다.</p>
+    <p class="tiny">Railway의 WEB_ADMIN_PASSWORD에 정한 비밀번호로 로그인하세요. Discord 토큰을 입력하지 마세요.</p>
   </section>
 </div>
 <div id="app" hidden>
@@ -68,7 +69,7 @@
     </section>
     <section id="tab-diagnostics" class="tab-panel" hidden>
       <div class="section-intro"><p class="eyebrow accent">CONNECTION CHECK</p><h2>연결 상태를 확인해요.</h2><p class="muted">통화방 접속과 노래 재생 문제를 나눠서 확인하세요.</p></div>
-      <div class="diagnostic-grid"><section class="card"><div class="section-head"><h3>설치 및 실행 상태</h3><button id="reload-diagnostics" class="ghost">다시 확인</button></div><div id="diagnostic-values"></div></section><section class="card"><h3>연결 전 체크리스트</h3><div id="diagnostic-checks"></div><a class="button soft wide" href="/api/export" download>곡·타순 설정 백업</a><p class="tiny">JSON 설정만 내려받습니다. 오디오 파일은 DATA_DIR 폴더를 따로 백업하세요.</p></section></div>
+      <div class="diagnostic-grid"><section class="card"><div class="section-head"><h3>설치 및 실행 상태</h3><button id="reload-diagnostics" class="ghost">다시 확인</button></div><div id="diagnostic-values"></div></section><section class="card"><h3>연결 전 체크리스트</h3><div id="diagnostic-checks"></div><button type="button" id="export-backup" class="soft wide">곡·타순 설정 백업</button><p class="tiny">JSON 설정만 내려받습니다. 오디오 파일은 DATA_DIR 폴더를 따로 백업하세요.</p></section></div>
     </section>
     <footer class="player-bar"><div class="playing-title"><span class="mini-record" aria-hidden="true">♪</span><div><span class="eyebrow">NOW PLAYING</span><strong id="playing-title">재생 대기 중</strong><small id="playing-status">Discord 통화방에서 재생됩니다</small></div></div><div class="player-actions"><button id="next-player" class="soft">다음 타자 ▷</button><button id="stop" class="ghost">■ 정지</button></div><label class="volume-label">볼륨 <span id="volume-value">50%</span><input id="volume" type="range" min="0" max="100" value="50" aria-label="볼륨"></label></footer>
     <p class="page-footer">APPEARANCE STUDIO <span>·</span> 사용할 권리가 있는 음원만 등록해주세요.</p>

@@ -3,3 +3,13 @@
 .mobile-only{display:none}@media(max-width:900px){.mobile-only{display:inline-flex}}
 
 @media(max-width:640px){.workspace{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:end}.workspace label{min-width:0}.workspace button{white-space:nowrap;min-width:0}.workspace select{width:100%}}
+
+/* Separate Firebase frontend / Railway API connection state. */
+.server-connection{margin:20px 0;padding:16px;border:1px solid var(--border,#303848);border-radius:14px;text-align:left;background:rgba(255,255,255,.025)}
+.server-connection p{overflow-wrap:anywhere;margin:8px 0}
+.connection-line{display:flex;align-items:center;gap:12px;justify-content:space-between;font-size:.84rem}
+.connection-line button{flex-shrink:0;padding:8px 10px;font-size:.78rem}
+#connection-status{overflow-wrap:anywhere}#connection-status.error{color:#ffab9d}#connection-status.success{color:#a2dfc8}
+.login-card{max-width:520px}.diagnostic-row strong{overflow-wrap:anywhere;min-width:0;max-width:65%;text-align:right}
+
+@media(max-width:420px){.connection-line{align-items:flex-start}.server-connection{padding:12px}}
