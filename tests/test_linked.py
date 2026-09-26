@@ -85,8 +85,10 @@ class LinkedConfigurationTests(unittest.TestCase):
     def test_website_copy_and_exact_csp(self):
         if not (ROOT/'웹사이트/firebase.json').is_file():
             self.skipTest('웹사이트용 ZIP도 웹사이트/ 폴더에 적용한 뒤 비교합니다.')
-        for filename in ['index.html','config.js','app.js','style.css']:
+        for filename in ['index.html','app.js','style.css','manifest.webmanifest','pwa.js','sw.js','download.html','offline.html']:
             self.assertEqual((ROOT/'static'/filename).read_bytes(),(ROOT/'웹사이트/static'/filename).read_bytes())
+        self.assertIn('API_BASE_URL: ""', (ROOT/'static/config.js').read_text())
+        self.assertIn(BACK, (ROOT/'웹사이트/static/config.js').read_text())
         hosting=json.loads((ROOT/'웹사이트/firebase.json').read_text())['hosting']
         self.assertEqual(hosting['public'],'static')
         self.assertEqual(hosting['site'],'appearance-song')
@@ -171,7 +173,7 @@ class LinkedAPIRegressionTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/connection',headers={'Origin':FRONT})
         self.assertEqual(r.status,200)
         d=await r.json()
-        self.assertEqual(d['build'],'railway-sqlite-20260919-1')
+        self.assertEqual(d['build'],'studio-20260926-1')
         for forbidden in ['accessToken','password','songs','guilds','firebase_key']:
             self.assertNotIn(forbidden,d)
         for path in ['/.env','/deployment-link.json','/config.py','/webapp.py']:

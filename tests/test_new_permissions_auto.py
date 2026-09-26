@@ -47,13 +47,13 @@ class PlayerAccountPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 200, await r.text())
         return (await r.json())['csrf']
 
-    async def test_player_can_upload_and_register_song_but_not_admin_settings(self):
+    async def test_registrar_can_upload_register_delete_song_but_not_admin_settings(self):
         password = 'Player-password-123'
         r = await self.client.post('/api/signup', json={'username': 'player1', 'displayName': '재생자1', 'password': password})
         self.assertEqual(r.status, 201, await r.text())
 
         csrf = await self._login('admin', self.s.web_password)
-        r = await self.client.put('/api/users/player1', json={'role': 'player', 'enabled': True}, headers={'X-CSRF-Token': csrf})
+        r = await self.client.put('/api/users/player1', json={'role': 'registrar', 'enabled': True}, headers={'X-CSRF-Token': csrf})
         self.assertEqual(r.status, 200, await r.text())
         r = await self.client.post('/api/logout', json={}, headers={'X-CSRF-Token': csrf})
         self.assertEqual(r.status, 200)
@@ -76,7 +76,7 @@ class PlayerAccountPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved['memberId'], '123456789012345678')
 
         r = await self.client.delete('/api/songs?team=A팀&name=ID선수', headers=headers)
-        self.assertEqual(r.status, 403)
+        self.assertEqual(r.status, 200)
         r = await self.client.post('/api/team', json={'team': '새팀'}, headers=headers)
         self.assertEqual(r.status, 403)
 

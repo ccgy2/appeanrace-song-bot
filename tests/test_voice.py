@@ -56,9 +56,10 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_channel(self):
         g,ch,_=setup_pair();ch.user_limit=1;ch.members=[object()]
         with self.assertRaisesRegex(voice.VoiceError,'가득'):await voice.VoiceManager().connect(g,ch)
-    async def test_stage_rejected(self):
+    async def test_stage_type_is_accepted_by_permission_check(self):
         g,ch,_=setup_pair();ch.type=discord.ChannelType.stage_voice
-        with self.assertRaisesRegex(voice.VoiceError,'스테이지'):await voice.VoiceManager().connect(g,ch)
+        voice.VoiceManager.check_channel(g,ch)
+        # Actual speaker promotion/request behavior is in test_studio_update.StageTests.
     async def test_missing_channel(self):
         g,_,_=setup_pair()
         with self.assertRaisesRegex(voice.VoiceError,'먼저'):await voice.VoiceManager().connect(g)

@@ -240,8 +240,8 @@ class LibraryAPITests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/backup',headers=self.h);self.assertEqual(r.status,200,await r.text() if r.status!=200 else '')
         with zipfile.ZipFile(io.BytesIO(await r.read())) as z:
             names=z.namelist()
-            self.assertIn('uploads/'+asset['id']+'.wav',names)
-            self.assertEqual(z.read('uploads/'+asset['id']+'.wav'),wav())
+            self.assertIn('uploads/'+asset['name'],names)
+            self.assertEqual(z.read('uploads/'+asset['name']),wav())
             data=json.loads(z.read('metadata.json'));self.assertEqual(data['schema'],2)
             info=json.loads(z.read('backup-info.json'));self.assertIn('b'*32,info['missingAssetIds'])
             for name in names:
@@ -261,21 +261,20 @@ class LibraryAPITests(unittest.IsolatedAsyncioTestCase):
         self.panel.s=self.assets.settings
         r=await self.client.get('/api/state',headers=self.h)
         self.assertFalse((await r.json())['fileStorage']['uploadsAllowed'])
-        form=aiohttp.FormData();form.add_field('file',wav(),filename='a.wav')
+        form=aiohttp.FormData(quote_fields=False);form.add_field('file',wav(),filename='a.wav')
         r=await self.client.post('/api/upload',headers=self.h,data=form)
         self.assertEqual(r.status,400);self.assertIn('Volume',(await r.json())['error'])
         self.assertEqual(list(self.assets.root.iterdir()),[])
 
-    async def test_player_can_register_and_rename_all_types_but_cannot_bind_or_delete_or_backup(self):
-        r=await self.client.post('/api/signup',json={'username':'player1','displayName':'재생자','password':'user-password-1234'})
-        self.assertEqual(r.status,201)
-        r=await self.client.put('/api/users/player1',json={'role':'player'},headers=self.h);self.assertEqual(r.status,200)
-        self.h=await self.login('player1','user-password-1234')
+    async def test_registrar_can_register_rename_delete_and_bind_but_not_backup(self):
+        await self.client.post('/api/signup',json={'username':'registrar1','displayName':'등록삭제자','password':'user-password-1234'})
+        r=await self.client.put('/api/users/registrar1',json={'role':'registrar'},headers=self.h);self.assertEqual(r.status,200)
+        self.h=await self.login('registrar1','user-password-1234')
         for category in SONG_CATEGORIES:
             r=await self.save(category=category);self.assertEqual(r.status,200)
             r=await self.save(name='새닉',oldName='김선수',category=category);self.assertEqual(r.status,200,await r.text())
-            r=await self.client.delete('/api/songs?team=팀&name=새닉&category='+category,headers=self.h);self.assertEqual(r.status,403)
-        r=await self.client.put('/api/events',json={'team':'팀','key':'homerun','songName':'새닉'},headers=self.h);self.assertEqual(r.status,403)
+            r=await self.client.put('/api/events',json={'team':'팀','key':'homerun','songName':'새닉','category':category},headers=self.h);self.assertEqual(r.status,200)
+            r=await self.client.delete('/api/songs?team=팀&name=새닉&category='+category,headers=self.h);self.assertEqual(r.status,200)
         r=await self.client.get('/api/backup',headers=self.h);self.assertEqual(r.status,403)
 
     async def test_admin_can_create_rename_bind_and_delete_custom_game_situation(self):
@@ -291,7 +290,7 @@ class LibraryAPITests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.put('/api/events',json={'team':'팀','key':key,'assetId':None},headers=self.h);self.assertEqual(r.status,200)
         doc=await self.store.event('팀',key);self.assertEqual(doc['label'],'작전 타임');self.assertNotIn('songName',doc)
         r=await self.client.delete('/api/events?team=%ED%8C%80&key='+key,headers=self.h);self.assertEqual(r.status,200,await r.text())
-        self.assertIsNone(await self.store.event('팀',key))
+        self.assertTrue((await self.store.event('팀',key))['deleted'])
 
     async def test_custom_game_situation_duplicate_and_player_management_blocked(self):
         r=await self.client.post('/api/events',json={'team':'팀','label':'홈런'},headers=self.h);self.assertEqual(r.status,400)

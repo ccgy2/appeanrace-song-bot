@@ -1,0 +1,216 @@
+{
+  "source": "APPEANRACE.zip",
+  "checkedFiles": 52,
+  "allAudioAndSoundBytesUnchanged": true,
+  "notes": "Source ZIP contains some UTF-8 names without UTF-8 flag; extraction recovers UTF-8 paths, preserving original bytes.",
+  "files": [
+    {
+      "path": "sounds/strikeout.mp3",
+      "sha256": "142fa9f8abea55014649f89e3f306939c56f1a5795322332a37725a287a46efb"
+    },
+    {
+      "path": "sounds/inning_change.mp3",
+      "sha256": "c7ad4e28e6a456433cd6fb6e03ccaa07819a84d76f8fb9c17debf6232ef1af1d"
+    },
+    {
+      "path": "sounds/homerun.mp3",
+      "sha256": "2cb47fe11b317a6c8df29d40748079e6b772be0306b710d5bef7d136647caa39"
+    },
+    {
+      "path": "sounds/game_end.mp3",
+      "sha256": "d139411b412ff288c89af34520d8b933d1dadfc686f0f24c3ee670ed1ab99ab4"
+    },
+    {
+      "path": "sounds/fly.mp3",
+      "sha256": "142fa9f8abea55014649f89e3f306939c56f1a5795322332a37725a287a46efb"
+    },
+    {
+      "path": "sounds/game_end1/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/game_end1/game_end.mp3",
+      "sha256": "d139411b412ff288c89af34520d8b933d1dadfc686f0f24c3ee670ed1ab99ab4"
+    },
+    {
+      "path": "sounds/homerun/homerun1.mp3",
+      "sha256": "2cb47fe11b317a6c8df29d40748079e6b772be0306b710d5bef7d136647caa39"
+    },
+    {
+      "path": "sounds/homerun/11",
+      "sha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e"
+    },
+    {
+      "path": "sounds/fullcount/fullcount.mp3",
+      "sha256": "c8e987bcbdb9e048a077e4b732336bf5448bb1aeb42c4128a8d6893211f5d5d6"
+    },
+    {
+      "path": "sounds/fullcount/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/start/∞ùÿ∞ºÇ∞ï£∞₧æ.mp3",
+      "sha256": "af6a77ac050858f2a639806ac06199d701fdacc399d1052b8c88feb786c6708e"
+    },
+    {
+      "path": "sounds/start/φò£φÖö∞ï£∞₧æ.mp3",
+      "sha256": "6016a42ecee863b058bf8594a8c87266b6608609f0f854e940606cf71e03aede"
+    },
+    {
+      "path": "sounds/start/∞ï£∞₧æ.mp3",
+      "sha256": "f90febd9d0050ca155f8e9595e5deb0115451023544c521a87dbb937da6f778e"
+    },
+    {
+      "path": "sounds/start/Ω╕░∞òä∞ï£∞₧æ.mp3",
+      "sha256": "e2937eebf62d626341a7bc98fdd6d9ea9a9407a68f5a3ac16d966a47ff66e92d"
+    },
+    {
+      "path": "sounds/start/∞ï£∞₧æ2.mp3",
+      "sha256": "a1dcb25fa10858a9f4f5821cd5f918ffc5568daf1bb30a66be4283c2f475d839"
+    },
+    {
+      "path": "sounds/start/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/end/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/homerun2/homerun2.mp3",
+      "sha256": "6769543bee3212a9ef375c6c0ffeff737c252cac6179ac7db04819fc0f55dbb2"
+    },
+    {
+      "path": "sounds/homerun2/homerun4.mp3",
+      "sha256": "6a6398cee0aa5b443046b63b55c804f99bf75e330aa9f3ebb2dda667902e0beb"
+    },
+    {
+      "path": "sounds/homerun2/homerun3.mp3",
+      "sha256": "c44b1ae2336e700a1b3596b33b7ac303f4eca4c7d24d50e3408fc1b37b99050f"
+    },
+    {
+      "path": "sounds/homerun2/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/score/score1.mp3",
+      "sha256": "ed54e0311f739c84174c478b0eb5ab459e918878a16d4ec9b97a9912a53c04bc"
+    },
+    {
+      "path": "sounds/score/11",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/look/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/look/look.mp3",
+      "sha256": "23a2435b8960facc38b4c819a675173547872ccba50cc9c5c5af0da37b4716c9"
+    },
+    {
+      "path": "sounds/game_end/∞òäφîîφè╕.mp3",
+      "sha256": "f3c08c6229e3a42d5c7862da26b216ff0681ebf1bc93a41d3792d740c8208010"
+    },
+    {
+      "path": "sounds/game_end/Ω▓╜Ω╕░∞óàδúî4-φò£φÖö.mp3",
+      "sha256": "6dc8e1a5a3569cad401f3088fe7ed0a3745f658504035a8daac8172b57859465"
+    },
+    {
+      "path": "sounds/game_end/∞áäδáÑ∞ºê∞ú╝.mp3",
+      "sha256": "7af67a5b29856e0bc442d8360acad0324b776a5c73abf9e65fdc2d771882aa4f"
+    },
+    {
+      "path": "sounds/game_end/δºêΩ╡¼δºêΩ╡¼.mp3",
+      "sha256": "d139411b412ff288c89af34520d8b933d1dadfc686f0f24c3ee670ed1ab99ab4"
+    },
+    {
+      "path": "sounds/game_end/Ω▓╜Ω╕░∞óàδúî2.mp3",
+      "sha256": "ee956801a11d652360a97ef3cdb99ed952d3d57abb3f5b70559f2a14d13bd7fc"
+    },
+    {
+      "path": "sounds/game_end/∞èñφåáδ╕îδª¼Ω╖╕.mp3",
+      "sha256": "659dd2c9d80c6f4bdebc75aca7a55ab7a1d2cfc5793d576d2a04946c7a02ad0b"
+    },
+    {
+      "path": "sounds/game_end/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/game_end/∞╣ÿΩ│áδï¼δáñδ¥╝.mp3",
+      "sha256": "74bad75c070eb0a8d0c3a14a2e305021ddeb5ae2e3410803ecf9b056f8dabacb"
+    },
+    {
+      "path": "sounds/game_end/Ω▓╜Ω╕░∞óàδúî3-∞ùÿδÅäδ¥╝δÅä.mp3",
+      "sha256": "6aac6539bc5bfddbf0dd86a2c382e2bf50cbd26005d97b9fcafd23cbe51fc686"
+    },
+    {
+      "path": "sounds/game_end/Ω▓╜Ω╕░∞óàδúî5-∞ùÿ∞ºÇ.mp3",
+      "sha256": "4ef6a8225723c810961ce8eca6e11257cbd1acc6b9f349d3ce1b6071c58039e7"
+    },
+    {
+      "path": "sounds/lineup/LG_lineup2.mp3",
+      "sha256": "83d40fa06bbc55337af45b3879933a3f4189df971a17071a01c476a4383e6682"
+    },
+    {
+      "path": "sounds/lineup/φò£φÖöδ¥╝∞¥╕∞ùà.mp3",
+      "sha256": "d6e5e34aa225d3b24c2d313774ac051f1f806d80d952617798f5b01e45bee3cf"
+    },
+    {
+      "path": "sounds/lineup/11",
+      "sha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e"
+    },
+    {
+      "path": "sounds/lineup/kia_lineup.mp3",
+      "sha256": "b6c595461b781178a9dad37eebe936bb900fe92f36c08c47e54c238b16481130"
+    },
+    {
+      "path": "sounds/strikeout/11",
+      "sha256": "25d4f2a86deb5e2574bb3210b67bb24fcc4afb19f93a7b65a057daa874a9d18e"
+    },
+    {
+      "path": "sounds/strikeout/so.mp3",
+      "sha256": "24707987eef13f18c44c3adcb23f2a31e306b6e0661a479dbc379000fa459f66"
+    },
+    {
+      "path": "sounds/4ball/4ball.mp3",
+      "sha256": "38e590c00c1c2e6384054d0839f0ecc4c8573e10b2f20e2f6414b1d03f5ba6c3"
+    },
+    {
+      "path": "sounds/4ball/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/fly/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/fly/fly.mp3",
+      "sha256": "c828c1d2df26c1efad8223853ba941194e8f722ad880e931ccfe145191930565"
+    },
+    {
+      "path": "sounds/steal/steal.mp3",
+      "sha256": "1653b8e43184c5ac960283ea8e297e332b6d9bb20f03e8f5e15747c0c4ec93aa"
+    },
+    {
+      "path": "sounds/steal/1",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/inning_change/inning_change.mp3",
+      "sha256": "c7ad4e28e6a456433cd6fb6e03ccaa07819a84d76f8fb9c17debf6232ef1af1d"
+    },
+    {
+      "path": "sounds/inning_change/11",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    {
+      "path": "sounds/out/out.mp3",
+      "sha256": "d55c26cd58594e29c53b713769a1dbf999f75acdcd3d8b429dc053c53251567b"
+    },
+    {
+      "path": "sounds/out/11",
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    }
+  ]
+}
