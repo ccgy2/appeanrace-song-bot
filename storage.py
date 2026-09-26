@@ -16,12 +16,15 @@ from validation import clean_name, song_category, SONG_COLLECTIONS, SONG_CATEGOR
 
 log = logging.getLogger(__name__)
 LOCAL_SQLITE_LOCK = threading.RLock()
+PLAYBACK_CACHE: dict[str, dict] = {}
+PLAYBACK_LOCK = threading.RLock()
 
 
 class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.lock = LOCAL_SQLITE_LOCK if not settings.firebase_key else threading.RLock()
+        self.playback_cache_key = ('firebase' if settings.firebase_key else str(settings.data_dir.resolve()))
         self.db = None
         self.sql = None
         if settings.firebase_key:
@@ -229,38 +232,36 @@ class Store:
                     data = {k: v for k, v in row.items() if k != 'id'}
                     data['name'] = new
                     writes.append((f'{root}/lineup/{row["id"]}', data if new else None))
-        if category == 'situation':
-            for row in self._list(f'{root}/events'):
-                data = {k: v for k, v in row.items() if k != 'id'}
-                changed = False
-                if row.get('songName') == old and row.get('category') == 'situation':
-                    if new:
-                        data['songName'] = new
-                    else:
-                        data.pop('songName', None)
-                        data.pop('category', None)
-                    changed = True
-                tracks = row.get('tracks')
-                if isinstance(tracks, list):
-                    next_tracks = []
-                    for track in tracks:
-                        if not isinstance(track, dict):
-                            continue
-                        item = dict(track)
-                        if item.get('type') == 'song' and item.get('songName') == old:
-                            changed = True
-                            if not new:
-                                continue
-                            item['songName'] = new
-                        next_tracks.append(item)
-                    if changed:
-                        data['tracks'] = next_tracks
-                if changed:
-                    has_source = bool(data.get('songName') or data.get('assetId') or data.get('file') or data.get('tracks'))
-                    if not has_source and not data.get('isCustom'):
-                        writes.append((f'{root}/events/{row["id"]}', None))
-                    else:
-                        writes.append((f'{root}/events/{row["id"]}', data))
+        for row in self._list(f'{root}/events'):
+            data = {k: v for k, v in row.items() if k != 'id'}
+            changed = False
+            if row.get('songName') == old and row.get('category', 'situation') == category:
+                if new:
+                    data['songName'] = new
+                else:
+                    data.pop('songName', None)
+                    data.pop('category', None)
+                changed = True
+            tracks = row.get('tracks')
+            if isinstance(tracks, list):
+                next_tracks = []
+                for track in tracks:
+                    if not isinstance(track, dict): continue
+                    item = dict(track)
+                    if (item.get('type') == 'song' and item.get('songName') == old
+                            and item.get('category', 'situation') == category):
+                        changed = True
+                        if not new: continue
+                        item['songName'] = new
+                    next_tracks.append(item)
+                if changed: data['tracks'] = next_tracks
+            if changed:
+                has_source = bool(data.get('songName') or data.get('assetId') or data.get('file') or data.get('tracks'))
+                # Deleted built-ins must never reappear as a side-effect of deleting a song.
+                if not has_source and not data.get('isCustom') and not data.get('deleted'):
+                    writes.append((f'{root}/events/{row["id"]}', None))
+                else:
+                    writes.append((f'{root}/events/{row["id"]}', data))
         return writes
 
     async def save_song(self, team: str, song: dict, *, old_name: str | None = None):
@@ -357,8 +358,40 @@ class Store:
         await self.create_team(team)
         await self._run(self._apply, [(f'teams/{clean_name(team)}/events/{clean_name(key)}', data)])
 
+    def playback_snapshot(self) -> dict:
+        """Memory only: safe for the frequent live-status endpoint. Shared by both bot slots."""
+        return dict(PLAYBACK_CACHE.get(self.playback_cache_key, {'enabled': True, 'revision': 0}))
+
+    async def playback_settings(self) -> dict:
+        if self.playback_cache_key not in PLAYBACK_CACHE:
+            def work():
+                with PLAYBACK_LOCK:
+                    if self.playback_cache_key in PLAYBACK_CACHE:
+                        return
+                    doc = self._read('settings/playback') or {}
+                    PLAYBACK_CACHE[self.playback_cache_key] = {
+                        'enabled': doc.get('autoEntranceEnabled', True) is not False,
+                        'revision': int(doc.get('autoEntranceRevision', 0)),
+                    }
+            await self._run(work)
+        return self.playback_snapshot()
+
+    async def set_auto_entrance(self, enabled: bool) -> dict:
+        if type(enabled) is not bool:
+            raise ValueError('ON/OFF 값은 true 또는 false여야 합니다.')
+        def work():
+            # Both Discord clients also share this lock when using optional Firestore.
+            with PLAYBACK_LOCK:
+                doc = self._read('settings/playback') or {}
+                revision = int(doc.get('autoEntranceRevision', 0)) + 1
+                self._write('settings/playback', {'autoEntranceEnabled': enabled,
+                            'autoEntranceRevision': revision}, True)
+                PLAYBACK_CACHE[self.playback_cache_key] = {'enabled': enabled, 'revision': revision}
+        await self._run(work)
+        return self.playback_snapshot()
+
     async def export(self) -> dict:
-        result = {'schema': 2, 'note': 'JSON에는 오디오가 없습니다. 오디오 포함 ZIP 백업도 내려받으세요.', 'teams': {}}
+        result = {'schema': 2, 'note': 'JSON에는 오디오가 없습니다. 오디오 포함 ZIP 백업도 내려받으세요.', 'teams': {}, 'playbackSettings': await self.playback_settings()}
         for name in await self.teams():
             library = await self.library(name)
             result['teams'][name] = {'songs': library['entrance'], 'library': library,

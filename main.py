@@ -16,17 +16,18 @@ from storage import Store
 from validation import EVENTS, clean_name, parse_song_args
 from voice import VoiceError
 from webapp import WebPanel
+from permissions import allowed, discord_role, DISCORD_ROLE_NAMES, LEGACY_PLAYER_ROLE
 
 log = logging.getLogger('appearance')
 ENTRANCE_ROLE = '등장곡 재생인'
 
 
 def can_manage(member, settings: Settings) -> bool:
-    return bool(member and (
-        member.id == settings.owner_id
-        or getattr(member, 'guild_permissions', discord.Permissions.none()).administrator
-        or any(r.name == ENTRANCE_ROLE for r in getattr(member, 'roles', []))
-    ))
+    return allowed(discord_role(member, settings.owner_id), 'play')
+
+
+def can_register(member, settings: Settings) -> bool:
+    return allowed(discord_role(member, settings.owner_id), 'music')
 
 
 def text_channel(guild):
@@ -76,6 +77,7 @@ class AppearanceBot(commands.Bot):
         self.now_messages: dict[int, discord.Message] = {}
 
     async def setup_hook(self):
+        await self.store.playback_settings()
         self.add_view(LineupView(self))
         if self.web_owner and self.settings.web_enabled and self.panel is not None:
             if self.settings.web_password:
@@ -111,7 +113,7 @@ class AppearanceBot(commands.Bot):
         elif isinstance(error, commands.NoPrivateMessage):
             msg = '서버의 텍스트 채널에서 사용하세요.'
         elif isinstance(error, commands.CheckFailure):
-            msg = '관리자 / 등장곡 재생인 / OWNER_ID만 사용할 수 있습니다.'
+            msg = '이 명령의 권한이 없습니다. 재생은 등장곡 재생자 이상, 등록·수정·삭제는 등장곡 등록/삭제자 이상, 운영 설정은 관리자만 가능합니다.'
         elif isinstance(error, commands.BadArgument):
             msg = f'입력 형식이 잘못됐습니다. `{"!2" if self.slot == "secondary" else "!"}도움`을 확인하세요.'
         elif isinstance(original, (ValueError, VoiceError)):
@@ -189,7 +191,7 @@ class AppearanceBot(commands.Bot):
         embed = discord.Embed(title=f'⚾ {self.label} · {team} 라인업 (현재 {state["currentOrder"]}번)', color=discord.Color.blurple())
         for i in range(1, 10):
             embed.add_field(name=f'{i}번', value=lineup.get(str(i)) or '-', inline=True)
-        embed.set_footer(text='관리자 / 등장곡 재생인 / OWNER_ID 조작 가능 · 웹에서 곡·타순 등록')
+        embed.set_footer(text='재생자 이상 조작 가능 · 등록/삭제자 음악 편집 · 관리자 타순 설정')
         return embed
 
     async def refresh_lineup(self, guild):
@@ -260,6 +262,9 @@ class AppearanceBot(commands.Bot):
         # 퇴장/음소거 같은 상태 변경은 무시하고, 새 입장 또는 다른 통화방으로 이동한 경우만 처리한다.
         if after.channel is None or before.channel == after.channel:
             return
+        auto_setting = await self.store.playback_settings()
+        if not auto_setting['enabled']:
+            return
         key = (guild.id, member.id)
         now = time.monotonic()
         # Discord가 짧은 시간 안에 중복 상태 이벤트를 보내는 경우만 막는다.
@@ -277,7 +282,7 @@ class AppearanceBot(commands.Bot):
             current = await self.store.get_team(guild.id, self.slot)
             teams = [current] if self.settings.secondary_token else [current] + [t for t in await self.store.teams() if t != current]
             member_id = str(member.id)
-            has_legacy_role = any(r.name == ENTRANCE_ROLE for r in getattr(member, 'roles', []))
+            has_legacy_role = can_manage(member, self.settings)
 
             for team in teams:
                 songs = await self.store.songs(team)
@@ -295,7 +300,7 @@ class AppearanceBot(commands.Bot):
                     if any(not m.bot for m in guild.voice_client.channel.members):
                         return
                 self.ensure_distinct_voice_channel(guild, after.channel)
-                ok = await self.player.play(guild, team, song, after.channel, order)
+                ok = await self.player.play(guild, team, song, after.channel, order, auto_revision=auto_setting['revision'])
                 if ok:
                     await self.store.set_team(guild.id, team, self.slot)
                     await self.now_embed(guild, channel, team)
@@ -348,7 +353,7 @@ class LineupView(discord.ui.View):
 
     async def interaction_check(self, interaction):
         if not interaction.guild or not can_manage(interaction.user, self.app.settings):
-            await interaction.response.send_message('관리자 / 등장곡 재생인 / OWNER_ID만 조작할 수 있습니다.', ephemeral=True)
+            await interaction.response.send_message('등장곡 재생자 이상 권한이 필요합니다. 기존 등장곡 재생인 역할도 지원합니다.', ephemeral=True)
             return False
         return True
 
@@ -364,6 +369,9 @@ class LineupView(discord.ui.View):
 def install_commands(bot: AppearanceBot):
     def manager():
         return commands.check(lambda ctx: can_manage(ctx.author, bot.settings))
+
+    def registrar():
+        return commands.check(lambda ctx: can_register(ctx.author, bot.settings))
 
     def admin_only():
         return commands.check(lambda ctx: bool(
@@ -419,6 +427,7 @@ def install_commands(bot: AppearanceBot):
         await ctx.send(f'✅ {bot.label} 알림 채널 지정을 해제했습니다. 이제 메시지를 보낼 수 있는 채널을 자동 선택합니다.')
 
     @bot.command(name='입장')
+    @manager()
     async def join(ctx):
         target_channel = member_channel(ctx.author)
         bot.ensure_distinct_voice_channel(ctx.guild, target_channel)
@@ -439,7 +448,7 @@ def install_commands(bot: AppearanceBot):
         await ctx.send('⏹ 재생을 정지했습니다.')
 
     @bot.command(name='팀')
-    @manager()
+    @admin_only()
     async def team(ctx, *, name: str):
         await bot.store.set_team(ctx.guild.id, clean_name(name), bot.slot)
         await ctx.send(f'✅ {bot.label} 현재 팀: ' + name)
@@ -451,7 +460,7 @@ def install_commands(bot: AppearanceBot):
         await ctx.send(f'🔊 볼륨 {value}% (재생 중인 곡에도 반영)')
 
     @bot.command(name='저장', aliases=['변경'])
-    @manager()
+    @registrar()
     async def save(ctx, *, args: str):
         song = parse_song_args(args)
         await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
@@ -508,21 +517,21 @@ def install_commands(bot: AppearanceBot):
         await play_library_category(ctx, 'situation', name)
 
     @bot.command(name='응원가저장')
-    @manager()
+    @registrar()
     async def save_cheer(ctx, *, args: str):
         song = {**parse_song_args(args), 'category': 'cheer'}
         await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
         await ctx.send('✅ 응원가 저장: ' + song['name'])
 
     @bot.command(name='상황곡저장')
-    @manager()
+    @registrar()
     async def save_situation(ctx, *, args: str):
         song = {**parse_song_args(args), 'category': 'situation'}
         await bot.store.save_song(await bot.store.get_team(ctx.guild.id, bot.slot), song)
         await ctx.send('✅ 상황별 노래 저장: ' + song['name'])
 
     @bot.command(name='타순', aliases=['교체'])
-    @manager()
+    @admin_only()
     async def order(ctx, num: int, *, args: str):
         if not 1 <= num <= 9:
             raise ValueError('타순은 1~9번입니다.')
@@ -533,7 +542,7 @@ def install_commands(bot: AppearanceBot):
         await bot.refresh_lineup(ctx.guild)
 
     @bot.command(name='이벤트저장')
-    @manager()
+    @registrar()
     async def save_event(ctx, key: str, *, filename: str):
         if key not in EVENTS:
             raise ValueError('효과음 키: ' + ', '.join(EVENTS))
@@ -541,34 +550,85 @@ def install_commands(bot: AppearanceBot):
         await bot.store.set_event(await bot.store.get_team(ctx.guild.id, bot.slot), key, {'file': filename})
         await ctx.send('✅ 효과음 저장: ' + key)
 
-    async def role_change(ctx, member, remove: bool):
-        if ctx.author.id != bot.settings.owner_id and not ctx.author.guild_permissions.administrator:
+    async def role_change(ctx, member, remove: bool, role_key='player', exclusive=False):
+        if discord_role(ctx.author, bot.settings.owner_id) != 'admin':
             raise commands.CheckFailure()
         if not ctx.guild.me.guild_permissions.manage_roles:
             raise ValueError('봇에 역할 관리 권한이 필요합니다.')
-        role = discord.utils.get(ctx.guild.roles, name=ENTRANCE_ROLE)
-        if role is None:
-            if remove:
-                await ctx.send('회수할 역할이 없습니다.')
-                return
-            role = await ctx.guild.create_role(name=ENTRANCE_ROLE, reason='등장곡 재생 권한')
-        if role >= ctx.guild.me.top_role:
-            raise ValueError('서버 역할 목록에서 봇 역할을 등장곡 재생인 역할보다 위로 올리세요.')
+        target_name = DISCORD_ROLE_NAMES[role_key]
+        role = discord.utils.get(ctx.guild.roles, name=target_name)
+        managed_names = {*DISCORD_ROLE_NAMES.values(), LEGACY_PLAYER_ROLE}
+        previous = [r for r in member.roles if r.name in managed_names and
+                    (exclusive or r.name == target_name or (role_key == 'player' and r.name == LEGACY_PLAYER_ROLE))]
+        if any(r >= ctx.guild.me.top_role for r in previous) or (role and role >= ctx.guild.me.top_role):
+            raise ValueError('서버 역할 목록에서 봇 역할을 관리할 등장곡 역할보다 위로 올리세요.')
         if remove:
-            await member.remove_roles(role)
+            if previous: await member.remove_roles(*previous, reason='등장곡 권한 회수')
         else:
-            await member.add_roles(role)
-        await ctx.send(('❌ 역할 회수: ' if remove else '🎧 역할 부여: ') + member.display_name)
+            if role is None:
+                role = await ctx.guild.create_role(name=target_name, reason='등장곡 권한 분리')
+            # Add first; never strip other unrelated Discord roles.
+            await member.add_roles(role, reason='등장곡 권한 설정')
+            obsolete = [r for r in previous if r.id != role.id] if exclusive else []
+            if obsolete: await member.remove_roles(*obsolete, reason='등장곡 권한 변경')
+        await ctx.send(('권한 회수: ' if remove else '권한 설정: ') + member.display_name + ' · ' + target_name)
 
     @bot.command(name='등장곡역할주기')
+    @admin_only()
     async def give_role(ctx, member: discord.Member):
         await role_change(ctx, member, False)
 
     @bot.command(name='등장곡역할회수')
+    @admin_only()
     async def remove_role(ctx, member: discord.Member):
         await role_change(ctx, member, True)
 
+    @bot.command(name='권한설정')
+    @admin_only()
+    async def set_role(ctx, member: discord.Member, *, role_name: str):
+        names = {**{v: k for k, v in DISCORD_ROLE_NAMES.items()},
+                 '등록삭제자': 'registrar', '등록/삭제자': 'registrar', '재생자': 'player',
+                 'registrar': 'registrar', 'player': 'player', 'user': 'user'}
+        key = names.get(role_name.strip())
+        if key is None:
+            raise ValueError('사용법: !권한설정 @사용자 등록삭제자 / 재생자 / 유저 (하나만 입력)')
+        await role_change(ctx, member, False, key, exclusive=True)
+
+    @bot.command(name='자동등장곡')
+    @manager()
+    async def auto_entrance(ctx, value: str = ''):
+        value = value.strip().lower()
+        if value:
+            if value not in {'on', 'off', '켜기', '끄기'}:
+                raise ValueError('사용법: !자동등장곡 on 또는 !자동등장곡 off')
+            setting = await bot.store.set_auto_entrance(value in {'on', '켜기'})
+        else:
+            setting = await bot.store.playback_settings()
+        await ctx.send('전체 자동 등장곡 ' + ('ON' if setting['enabled'] else 'OFF') +
+                       ' · 모든 서버/팀/청팀·백팀 봇에 공통 적용. 수동 재생은 유지됩니다.')
+
+    async def delete_library_song(ctx, name, category):
+        team = await bot.store.get_team(ctx.guild.id, bot.slot)
+        await bot.store.delete_song(team, clean_name(name), category)
+        await ctx.send('곡 등록과 관련 연결을 삭제했습니다. 업로드 원본 파일은 백업을 위해 보관합니다.')
+
+    @bot.command(name='삭제')
+    @registrar()
+    async def delete_entrance(ctx, *, name: str):
+        await delete_library_song(ctx, name, 'entrance')
+
+    @bot.command(name='응원가삭제')
+    @registrar()
+    async def delete_cheer(ctx, *, name: str):
+        await delete_library_song(ctx, name, 'cheer')
+
+    @bot.command(name='상황곡삭제')
+    @registrar()
+    async def delete_situation(ctx, *, name: str):
+        await delete_library_song(ctx, name, 'situation')
+
     @bot.command(name='이름변경')
+    @registrar()
     async def rename(ctx, *, args: str):
         team = await bot.store.get_team(ctx.guild.id, bot.slot)
         if ' / ' in args:
@@ -633,7 +693,9 @@ def install_commands(bot: AppearanceBot):
             f'`{p}이벤트저장 키 파일명` (파일은 sounds 안에 있어야 함)\n'
             f'`{p}등장곡역할주기 @유저` · `{p}등장곡역할회수 @유저` (관리자/OWNER_ID 전용)\n'
             f'`{p}이름변경 새이름` · `{p}이름변경 기존이름 / 새이름`\n'
-            '관리자 / 등장곡 재생인 / OWNER_ID가 곡·타순·재생을 관리합니다.\n'
+            f'`{p}자동등장곡 on/off` · `{p}삭제 이름` · `{p}응원가삭제 이름` · `{p}상황곡삭제 이름`\n'
+            f'`{p}권한설정 @유저 등록삭제자/재생자/유저` (권한 하나만 입력, 관리자 전용)\n'
+            '등록·삭제는 등록/삭제자 이상, 재생은 재생자 이상, 팀·타순·회원은 관리자만 가능합니다.\n'
             '2봇 모드에서는 각 봇에 웹에서 지정한 경기 팀의 등장곡만 자동 재생합니다.'
         )
 

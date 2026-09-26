@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 import discord
 
 log = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ class VoiceManager:
     def __init__(self):
         self.locks: dict[int, asyncio.Lock] = {}
         self.errors: dict[int, str] = {}
+        self.stage_requests: dict[tuple[int, int], float] = {}
 
     def lock(self, guild_id: int) -> asyncio.Lock:
         return self.locks.setdefault(guild_id, asyncio.Lock())
@@ -26,16 +28,19 @@ class VoiceManager:
             raise VoiceError('먼저 음성 채널에 들어가거나 웹에서 통화방을 선택하세요.')
         if channel.guild.id != guild.id:
             raise VoiceError('다른 서버의 음성 채널은 사용할 수 없습니다.')
-        if channel.type != discord.ChannelType.voice:
-            raise VoiceError('일반 음성 채널을 선택하세요. 스테이지 채널은 이 버전에서 지원하지 않습니다.')
+        if channel.type not in {discord.ChannelType.voice, discord.ChannelType.stage_voice}:
+            raise VoiceError('일반 음성 채널 또는 스테이지 채널을 선택하세요.')
         if guild.me is None:
             raise VoiceError('봇이 아직 서버 정보를 받지 못했습니다. 잠시 후 다시 시도하세요.')
         perms = channel.permissions_for(guild.me)
-        missing = [label for attr, label in [('view_channel', '채널 보기'), ('connect', '연결'), ('speak', '말하기')] if not getattr(perms, attr, False)]
+        required = [('view_channel', '채널 보기'), ('connect', '연결')]
+        if channel.type == discord.ChannelType.voice:
+            required.append(('speak', '말하기'))
+        missing = [label for attr, label in required if not getattr(perms, attr, False)]
         if missing:
             raise VoiceError('봇의 채널 권한이 부족합니다: ' + ', '.join(missing))
         already = guild.voice_client and guild.voice_client.channel and guild.voice_client.channel.id == channel.id
-        if channel.user_limit and len(channel.members) >= channel.user_limit and not already and not perms.move_members:
+        if getattr(channel, 'user_limit', 0) and len(channel.members) >= channel.user_limit and not already and not perms.move_members:
             raise VoiceError('통화방 인원이 가득 찼습니다. 인원 제한을 늘리거나 다른 방을 선택하세요.')
 
     @staticmethod
@@ -70,6 +75,42 @@ class VoiceManager:
         except Exception:
             log.debug('음성 상태 초기화 실패', exc_info=True)
 
+    async def ensure_stage_speaker(self, guild, channel):
+        """Do not send silent audio as an audience member. Never bypass Discord permissions."""
+        if channel.type != discord.ChannelType.stage_voice:
+            return
+        for _ in range(10):
+            state = getattr(guild.me, 'voice', None)
+            if state and state.channel and state.channel.id == channel.id:
+                break
+            await asyncio.sleep(.2)
+        else:
+            raise VoiceError('스테이지 음성 상태를 아직 받지 못했습니다. 잠시 후 다시 재생하세요.')
+        if not state.suppress:
+            self.stage_requests.pop((guild.id, channel.id), None)
+            return
+        perms = channel.permissions_for(guild.me)
+        if getattr(perms, 'mute_members', False):
+            try:
+                await asyncio.wait_for(guild.me.edit(suppress=False), timeout=8)
+            except discord.Forbidden:
+                raise VoiceError('스테이지 발언자 전환이 거부됐습니다. 이 채널의 멤버 음소거(Mute Members) 권한을 확인하거나 관리자가 봇을 발언자로 전환하세요.') from None
+            # REST completion and Gateway updates are separate; verify before FFmpeg starts.
+            for _ in range(15):
+                current = getattr(guild.me, 'voice', None)
+                if current and current.channel and current.channel.id == channel.id and not current.suppress:
+                    return
+                await asyncio.sleep(.2)
+            raise VoiceError('발언자 전환을 요청했지만 아직 확인되지 않았습니다. Discord에서 발언자 상태를 확인한 후 다시 재생하세요.')
+        key = (guild.id, channel.id)
+        if getattr(perms, 'request_to_speak', False) and time.monotonic() - self.stage_requests.get(key, 0) > 30:
+            try:
+                await asyncio.wait_for(guild.me.request_to_speak(), timeout=8)
+                self.stage_requests[key] = time.monotonic()
+            except discord.Forbidden:
+                pass
+        raise VoiceError('스테이지에 연결됐지만 청중 상태입니다. 관리자가 봇을 발언자로 전환한 뒤 다시 재생하세요. 자동 전환하려면 봇에 이 채널의 멤버 음소거(Mute Members) 권한을 허용하세요.')
+
     async def connect(self, guild, channel=None):
         async with self.lock(guild.id):
             channel = channel or (guild.voice_client.channel if guild.voice_client else None)
@@ -83,33 +124,35 @@ class VoiceManager:
                         except Exception:
                             await self._cleanup(guild)
                             vc = None
-                    if vc and vc.is_connected():
-                        self.errors.pop(guild.id, None)
-                        return vc
-                last = None
-                for attempt in range(2):
-                    if guild.voice_client:
-                        await self._cleanup(guild)
-                    try:
-                        vc = await asyncio.wait_for(
-                            channel.connect(timeout=25, reconnect=True, self_deaf=True), timeout=32,
-                        )
-                        if not vc.is_connected():
-                            raise VoiceError('음성 연결이 완료되지 않았습니다.')
-                        self.errors.pop(guild.id, None)
-                        return vc
-                    except asyncio.CancelledError:
-                        await self._cleanup(guild)
-                        raise
-                    except Exception as exc:
-                        last = exc
-                        log.warning('음성 연결 시도 %s/2 실패: guild=%s (%s)', attempt + 1, guild.id, type(exc).__name__, exc_info=True)
-                        await self._cleanup(guild)
-                        if isinstance(exc, discord.Forbidden) or getattr(exc, 'code', None) in {4017, 4014}:
+                if not vc or not vc.is_connected():
+                    last = None
+                    for attempt in range(2):
+                        if guild.voice_client:
+                            await self._cleanup(guild)
+                        try:
+                            vc = await asyncio.wait_for(
+                                channel.connect(timeout=25, reconnect=True, self_deaf=True), timeout=32)
+                            if not vc.is_connected():
+                                raise VoiceError('음성 연결이 완료되지 않았습니다.')
                             break
-                        if attempt == 0:
-                            await asyncio.sleep(1)
-                raise VoiceError(self.explain(last)) from last
+                        except asyncio.CancelledError:
+                            await self._cleanup(guild)
+                            raise
+                        except Exception as exc:
+                            last = exc
+                            vc = None
+                            log.warning('음성 연결 시도 %s/2 실패: guild=%s (%s)', attempt + 1, guild.id, type(exc).__name__, exc_info=True)
+                            await self._cleanup(guild)
+                            if isinstance(exc, discord.Forbidden) or getattr(exc, 'code', None) in {4017, 4014}:
+                                break
+                            if attempt == 0:
+                                await asyncio.sleep(1)
+                    if not vc:
+                        raise VoiceError(self.explain(last)) from last
+                # Speaker errors must keep the connection so a stage moderator can promote us.
+                await self.ensure_stage_speaker(guild, channel)
+                self.errors.pop(guild.id, None)
+                return vc
             except Exception as exc:
                 message = self.explain(exc)
                 self.errors[guild.id] = message
@@ -131,6 +174,8 @@ class VoiceManager:
             'playing': bool(vc and vc.is_playing()),
             'paused': bool(vc and vc.is_paused()),
             'serverMuted': bool(state and state.mute),
+            'stage': bool(vc and vc.channel and vc.channel.type == discord.ChannelType.stage_voice),
+            'stageAudience': bool(state and getattr(state, 'suppress', False) and vc and vc.channel and vc.channel.type == discord.ChannelType.stage_voice),
             'latencyMs': round(latency * 1000) if isinstance(latency, (int, float)) and math.isfinite(latency) else None,
             'error': self.errors.get(guild.id),
         }

@@ -21,6 +21,8 @@ from config import ROOT, normalize_origin
 from validation import EVENTS, clean_name, validate_song, song_category, SONG_CATEGORIES
 from persistence import storage_status
 from backups import write_music_backup
+from permissions import allowed, required_capability, ROLE_LABELS, ROLE_CAPABILITIES
+from event_tracks import event_tracks, MAX_EVENT_TRACKS
 
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
@@ -95,6 +97,8 @@ class WebPanel:
             web.get('/', self.index),
             web.get('/assets/{name}', self.static),
             web.get('/{name:app\\.js|config\\.js|style\\.css}', self.static),
+            web.get('/{name:download\\.html|offline\\.html|manifest\\.webmanifest|sw\\.js|pwa\\.js}', self.static),
+            web.get('/icons/{name}', self.icon),
             web.get('/healthz', self.health),
             web.get('/api/connection', self.connection),
             web.post('/api/login', self.login),
@@ -106,6 +110,8 @@ class WebPanel:
             web.post('/api/logout', self.logout),
             web.get('/api/state', self.state),
             web.get('/api/live', self.live),
+            web.get('/api/playback-settings', self.playback_settings),
+            web.put('/api/playback-settings', self.playback_settings),
             web.post('/api/team', self.team),
             web.post('/api/songs', self.save_song),
             web.delete('/api/songs', self.delete_song),
@@ -189,17 +195,11 @@ class WebPanel:
                     raise web.HTTPForbidden(text='로그인한 웹사이트에서 다시 시도하세요.')
                 request['session'], request['session_key'] = sess, key
                 role = sess.get('role', 'pending')
-                if role not in {'admin', 'player'}:
+                if not allowed(role, 'read'):
                     raise web.HTTPForbidden(text='관리자 승인 대기 중인 계정입니다.')
-                # 재생자는 등장곡 파일 업로드와 곡 등록/수정까지 가능하다.
-                # 팀/타순/효과음/백업/회원 관리와 곡 삭제는 관리자 전용이다.
-                admin_only = (
-                    request.path.startswith('/api/users')
-                    or request.path in {'/api/team', '/api/lineup', '/api/events', '/api/export', '/api/backup'}
-                    or (request.path == '/api/songs' and request.method == 'DELETE')
-                )
-                if admin_only and role != 'admin':
-                    raise web.HTTPForbidden(text='관리자 권한이 필요합니다.')
+                capability = required_capability(request.path, request.method)
+                if not allowed(role, capability):
+                    raise web.HTTPForbidden(text='이 기능을 사용할 권한이 없습니다. 등록/삭제는 등록/삭제자, 재생 제어는 재생자 이상 권한이 필요합니다.')
                 if request.method not in {'GET', 'HEAD'}:
                     csrf = request.headers.get('X-CSRF-Token', '')
                     if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
@@ -230,7 +230,7 @@ class WebPanel:
             'X-Frame-Options': 'DENY',
             'Referrer-Policy': 'no-referrer',
             'Cache-Control': 'no-store',
-            'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         })
         return resp
 
@@ -239,9 +239,18 @@ class WebPanel:
 
     async def static(self, request):
         name = request.match_info['name']
-        if name not in {'app.js', 'style.css', 'config.js'}:
+        if name not in {'app.js', 'style.css', 'config.js', 'pwa.js', 'sw.js', 'manifest.webmanifest', 'download.html', 'offline.html'}:
             raise web.HTTPNotFound()
-        return web.FileResponse(ROOT / 'static' / name)
+        resp = web.FileResponse(ROOT / 'static' / name)
+        if name == 'manifest.webmanifest': resp.content_type = 'application/manifest+json'
+        if name == 'sw.js': resp.headers['Service-Worker-Allowed'] = '/'
+        return resp
+
+    async def icon(self, request):
+        name = request.match_info['name']
+        if name not in {'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'}:
+            raise web.HTTPNotFound()
+        return web.FileResponse(ROOT / 'static' / 'icons' / name)
 
     def all_bots(self):
         bots = [self.bot]
@@ -293,9 +302,9 @@ class WebPanel:
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
         bots = self.bot_targets()
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
-                         'authMode': 'bearer', 'web': 'ok', 'build': 'railway-sqlite-20260919-1',
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'studio-20260926-1',
                          'capabilities': ['library-categories', 'atomic-rename', 'storage-check',
-                                          'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
+                                          'roles-v3', 'global-autoplay', 'stage-voice', 'event-all-categories', 'event-delete-restore', 'original-name-backup', 'pwa', 'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
                              x['id'] == 'secondary' and x['ready'] for x in bots),
                          'bots': bots, 'webOnly': self.s.web_only})
@@ -323,7 +332,7 @@ class WebPanel:
             if await self.store.web_user(username): raise ValueError('이미 사용 중인 아이디입니다.')
             hashed = await asyncio.to_thread(password_hash, password)
             await self.store.save_web_user(username, {'passwordHash':hashed,'displayName':display,'role':'pending','enabled':True,'createdAt':int(time.time())})
-        return response({'ok':True,'message':'가입 신청 완료! 관리자가 재생자로 승인하면 로그인할 수 있습니다.'},201)
+        return response({'ok':True,'message':'가입 신청 완료! 관리자가 유저·재생자·등록/삭제자 중 하나로 승인하면 로그인할 수 있습니다.'},201)
 
     async def login(self, request):
         await self._ensure_admin(); now,window=self._limit_login(request); d=await body(request)
@@ -332,7 +341,7 @@ class WebPanel:
         user=await self.store.web_user(username)
         if not user or not await asyncio.to_thread(password_ok,supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
         if not user.get('enabled',True): raise web.HTTPForbidden(text='사용이 중지된 계정입니다.')
-        if user.get('role')=='pending': raise web.HTTPForbidden(text='관리자 승인 대기 중입니다.')
+        if not allowed(user.get('role'), 'read'): raise web.HTTPForbidden(text='관리자 승인 대기 중입니다.')
         window.clear(); key,csrf=secrets.token_urlsafe(40),secrets.token_urlsafe(32)
         sess={'expires':now+SESSION_TTL,'csrf':csrf,'mode':mode,'origin':self.request_origin(request),'username':username,'displayName':user.get('displayName',username),'role':user.get('role')}
         self.sessions[key]=sess; payload={'ok':True,'csrf':csrf,'user':{'username':username,'displayName':sess['displayName'],'role':sess['role']}}
@@ -348,7 +357,7 @@ class WebPanel:
         user=await self.store.web_user(username)
         if not user: raise ValueError('계정을 찾을 수 없습니다.')
         d=await body(request); role=d.get('role',user.get('role','pending'))
-        if role not in {'pending','player'}: raise ValueError('승인 대기 또는 재생자만 지정할 수 있습니다.')
+        if role not in {'pending','registrar','player','user'}: raise ValueError('승인 대기, 등장곡 등록/삭제자, 등장곡 재생자, 유저 중에서 선택하세요.')
         await self.store.save_web_user(username,{'role':role,'enabled':bool(d.get('enabled',user.get('enabled',True)))},True)
         self.sessions = {k:v for k,v in self.sessions.items() if v.get('username') != username}
         return response({'ok':True})
@@ -359,7 +368,7 @@ class WebPanel:
         await self.store.delete_web_user(username); self.sessions={k:v for k,v in self.sessions.items() if v.get('username')!=username}; return response({'ok':True})
 
     async def session(self, request):
-        return response({'csrf':request['session']['csrf'],'user':{k:request['session'].get(k) for k in ('username','displayName','role')}})
+        return response({'csrf':request['session']['csrf'],'user':{k:request['session'].get(k) for k in ('username','displayName','role')}, 'capabilities': sorted(ROLE_CAPABILITIES.get(request['session'].get('role'), ()))})
 
     async def logout(self, request):
         self.sessions.pop(request['session_key'], None)
@@ -402,6 +411,7 @@ class WebPanel:
             'otherBotVoice': ({'channelId': peer_voice_id, 'channelName': peer_voice_name, 'botLabel': peer_label}
                               if peer_voice_id else None),
             'nowPlaying': target_bot.player.now.get(guild.id) if guild else None,
+            'autoEntrance': self.store.playback_snapshot(),
         }
 
     async def live(self, request):
@@ -413,6 +423,7 @@ class WebPanel:
         return response(self._live_payload(target_bot, guild, target))
 
     async def state(self, request):
+        await self.store.playback_settings()
         target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
         target_bot = self.target_bot(target)
         guilds = [{'id': str(g.id), 'name': g.name} for g in target_bot.guilds]
@@ -456,6 +467,8 @@ class WebPanel:
                 'lineup': await self.store.lineup(team),
                 'state': state,
                 'events': self._event_rows(events),
+                'deletedEvents': [{'key': k, 'label': d.get('label') or EVENTS.get(k, k)} for k, d in events.items() if d.get('deleted')],
+                'maxEventTracks': MAX_EVENT_TRACKS,
                 'maxUploadMb': self.s.max_upload_mb,
             }
             self.state_cache[cache_key] = {'at': now, 'data': static}
@@ -469,64 +482,47 @@ class WebPanel:
         peer_voice_id = (live.get('otherBotVoice') or {}).get('channelId')
         peer_label = (live.get('otherBotVoice') or {}).get('botLabel')
         if guild:
-            for c in guild.voice_channels:
+            for c in [*guild.voice_channels, *getattr(guild, 'stage_channels', [])]:
                 perms = c.permissions_for(guild.me) if guild.me else None
                 occupied = peer_voice_id == str(c.id)
-                channels.append({'id': str(c.id), 'name': c.name,
+                is_stage = c in getattr(guild, 'stage_channels', [])
+                channels.append({'id': str(c.id), 'name': c.name, 'type': 'stage' if is_stage else 'voice',
+                                 'stageAutoSpeaker': bool(perms and getattr(perms, 'mute_members', False)) if is_stage else None,
                                  'members': len([m for m in c.members if not m.bot]),
                                  'occupiedByOtherBot': occupied,
                                  'occupiedByLabel': peer_label if occupied else None,
-                                 'available': bool(perms and perms.view_channel and perms.connect and perms.speak) and not occupied})
+                                 'available': bool(perms and perms.view_channel and perms.connect and (is_stage or perms.speak)) and not occupied})
         payload = dict(static)
         payload.update(live)
         payload.update({'guilds': guilds, 'channels': channels})
         return response(payload)
 
     def _event_tracks(self, doc: dict | None) -> list[dict]:
-        """Normalize new multi-track docs and old single-source docs."""
-        if not doc:
-            return []
-        raw = doc.get('tracks')
-        if isinstance(raw, list):
-            tracks = []
-            for item in raw[:30]:
-                if not isinstance(item, dict):
-                    continue
-                if item.get('type') == 'song' and item.get('songName'):
-                    tracks.append({'type': 'song', 'songName': str(item['songName'])})
-                elif item.get('type') == 'asset' and item.get('assetId'):
-                    tracks.append({'type': 'asset', 'assetId': str(item['assetId']),
-                                   'filename': str(item.get('filename') or '업로드 오디오')})
-            return tracks
-        if doc.get('songName') and doc.get('category') == 'situation':
-            return [{'type': 'song', 'songName': str(doc['songName'])}]
-        if doc.get('assetId'):
-            return [{'type': 'asset', 'assetId': str(doc['assetId']),
-                     'filename': str(doc.get('filename') or '업로드 오디오')}]
-        return []
+        return event_tracks(doc)
 
     async def _validated_event_tracks(self, team: str, value) -> list[dict]:
         if not isinstance(value, list):
             raise ValueError('경기 상황 곡 목록이 올바르지 않습니다.')
-        if len(value) > 30:
-            raise ValueError('한 경기 상황에는 최대 30곡까지 넣을 수 있습니다.')
+        if len(value) > MAX_EVENT_TRACKS:
+            raise ValueError(f'한 경기 상황에는 최대 {MAX_EVENT_TRACKS}곡까지 넣을 수 있습니다.')
         result, seen = [], set()
         for raw in value:
             if not isinstance(raw, dict):
                 raise ValueError('경기 상황 곡 정보가 올바르지 않습니다.')
             kind = str(raw.get('type', ''))
             if kind == 'song':
-                name = clean_name(raw.get('songName'), '상황별 노래 이름')
-                if not await self.store.song(team, name, 'situation'):
-                    raise ValueError(f'상황별 노래 라이브러리에 “{name}”을 먼저 등록하세요.')
-                ident = ('song', name)
-                item = {'type': 'song', 'songName': name}
+                name = clean_name(raw.get('songName'), '곡 이름')
+                category = song_category(raw.get('category', 'situation'))
+                if not await self.store.song(team, name, category):
+                    raise ValueError(f'{SONG_CATEGORIES[category]} 라이브러리에 “{name}”을 먼저 등록하세요.')
+                ident = ('song', category, name)
+                item = {'type': 'song', 'songName': name, 'category': category}
             elif kind == 'asset':
                 meta = self.assets.get(str(raw.get('assetId', '')))
                 ident = ('asset', meta['id'])
                 item = {'type': 'asset', 'assetId': meta['id'], 'filename': meta['name']}
             else:
-                raise ValueError('경기 상황에는 상황별 노래 또는 업로드 오디오만 넣을 수 있습니다.')
+                raise ValueError('경기 상황에는 등장곡·응원가·상황별 노래 또는 업로드 오디오를 넣을 수 있습니다.')
             if ident in seen:
                 continue
             seen.add(ident); result.append(item)
@@ -536,6 +532,7 @@ class WebPanel:
         rows = []
         for key, label in EVENTS.items():
             doc = events.get(key)
+            if doc and doc.get('deleted'): continue
             source = None
             if doc:
                 source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
@@ -546,7 +543,7 @@ class WebPanel:
                          'customEvent': False, 'bundledCount': len(self.assets.bundled(key))})
         extras = []
         for key, doc in events.items():
-            if key in EVENTS or not doc.get('isCustom'):
+            if key in EVENTS or not doc.get('isCustom') or doc.get('deleted'):
                 continue
             label = str(doc.get('label') or key)
             source = {k: v for k, v in doc.items() if k not in {'id', 'label', 'isCustom'}} or None
@@ -583,10 +580,19 @@ class WebPanel:
         team = clean_name(request.query.get('team'), '팀 이름')
         key = str(request.query.get('key', ''))
         current = await self.store.event(team, key)
-        if not current or not current.get('isCustom') or key in EVENTS:
-            raise ValueError('직접 추가한 경기 상황만 삭제할 수 있습니다.')
-        await self.store.set_event(team, key, None)
+        if key not in EVENTS and not (current and current.get('isCustom')):
+            raise ValueError('알 수 없는 경기 상황입니다.')
+        # Tombstones remove built-ins too without erasing bundled files or breaking another team.
+        await self.store.set_event(team, key, {**(current or {}), 'deleted': True})
         return response({'ok': True})
+
+    async def playback_settings(self, request):
+        if request.method == 'PUT':
+            data = await body(request)
+            value = await self.store.set_auto_entrance(data.get('enabled'))
+        else:
+            value = await self.store.playback_settings()
+        return response({'ok': True, 'autoEntrance': value})
 
     async def team(self, request):
         data = await body(request)
@@ -673,6 +679,15 @@ class WebPanel:
         if key not in EVENTS and not custom_event:
             raise ValueError('알 수 없는 경기 상황입니다.')
 
+        if data.get('restore') is True:
+            if not current or not current.get('deleted'):
+                raise ValueError('삭제된 상황이 아닙니다.')
+            restored = {k: v for k, v in current.items() if k not in {'deleted', 'id'}}
+            await self.store.set_event(team, key, restored or None)
+            return response({'ok': True})
+        if current and current.get('deleted'):
+            raise ValueError('삭제된 경기 상황입니다. 먼저 복원하세요.')
+
         base = {}
         if custom_event:
             base = {'label': clean_name(current.get('label') or key, '상황 이름'), 'isCustom': True}
@@ -708,11 +723,12 @@ class WebPanel:
         asset = data.get('assetId')
         if data.get('songName'):
             name = clean_name(data['songName'])
-            if not await self.store.song(team, name, 'situation'):
-                raise ValueError('상황별 노래 라이브러리에 먼저 곡을 등록하세요.')
+            category = song_category(data.get('category', 'situation'))
+            if not await self.store.song(team, name, category):
+                raise ValueError('선택한 라이브러리에 먼저 곡을 등록하세요.')
             await self.store.set_event(team, key, {**base, 'playMode': 'single',
-                                                    'tracks': [{'type': 'song', 'songName': name}],
-                                                    'songName': name, 'category': 'situation'})
+                                                    'tracks': [{'type': 'song', 'songName': name, 'category': category}],
+                                                    'songName': name, 'category': category})
         elif asset:
             meta = self.assets.get(str(asset))
             await self.store.set_event(team, key, {**base, 'playMode': 'single',
@@ -769,6 +785,8 @@ class WebPanel:
             current = await self.store.event(team, key)
             if key not in EVENTS and not (current and current.get('isCustom')):
                 raise ValueError('알 수 없는 경기 상황입니다.')
+            if current and current.get('deleted'):
+                raise ValueError('삭제된 경기 상황입니다. 복원 후 재생하세요.')
             await player.event(guild, team, key, channel)
         else:
             raise ValueError('알 수 없는 명령입니다.')
@@ -801,6 +819,7 @@ class WebPanel:
                 'Discord Developer Portal → Bot → Message Content Intent 켜기 (!명령어용)',
                 '통화방 권한 덮어쓰기에서 채널 보기·연결·말하기 허용',
                 '서버 음소거 해제, 통화방 인원 제한 확인',
+                '스테이지 자동 발언자 전환: 봇에 멤버 음소거(Mute Members) 권한 필요. 권한이 없으면 관리자가 발언자로 초대/전환 후 다시 재생',
                 '같은 토큰을 두 봇에 중복 사용하지 않기. 보조 봇은 DISCORD_TOKEN_SECONDARY에 별도 토큰 사용',
                 'Railway replica는 1개 유지. 한 프로세스 안에서 청팀/백팀 봇 두 계정을 함께 실행',
                 '음성 연결은 UDP 송수신이 필요함. HTTP 포트만 열어서는 해결되지 않음',

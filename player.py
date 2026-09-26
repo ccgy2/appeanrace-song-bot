@@ -15,6 +15,8 @@ from config import Settings
 from storage import Store
 from validation import youtube_url, time_range
 from voice import VoiceManager, VoiceError
+from event_tracks import event_tracks
+from validation import EVENTS, song_category
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class Player:
         self.extract_slots = asyncio.Semaphore(2)
         self.extract_tasks: set[asyncio.Task] = set()
         self.event_sequence = defaultdict(int)
+        self.event_signatures = {}
         self.cookie_path = self._cookies()
 
     def _cookies(self) -> str | None:
@@ -82,7 +85,14 @@ class Player:
         self.stop(guild)
         await self.voice.disconnect(guild)
 
-    async def play(self, guild, team: str, song: dict, channel=None, order=None, preview=False):
+    async def _auto_permitted(self, revision):
+        if revision is None: return True
+        setting = await self.store.playback_settings()
+        return setting['enabled'] and setting['revision'] == revision
+
+    async def play(self, guild, team: str, song: dict, channel=None, order=None, preview=False, *, auto_revision=None):
+        if not await self._auto_permitted(auto_revision):
+            return False
         self.generation[guild.id] += 1
         generation = self.generation[guild.id]
         a, b = time_range(song.get('start', 0), song.get('end', 30))
@@ -121,6 +131,10 @@ class Player:
                     before += ' -user_agent ' + shlex.quote(ua)
             if generation != self.generation[guild.id]:
                 return False
+            if not await self._auto_permitted(auto_revision):
+                if generation == self.generation[guild.id]:
+                    self.now[guild.id] = {'title': '자동 등장곡 취소됨', 'status': 'stopped'}
+                return False
             vc = await self.voice.connect(guild, channel)
             if generation != self.generation[guild.id]:
                 return False
@@ -128,6 +142,10 @@ class Player:
                 raise VoiceError('봇이 서버 음소거 상태입니다. 통화방에서 봇의 서버 음소거를 해제하세요.')
             state = await self.store.state(team)
             if generation != self.generation[guild.id]:
+                return False
+            if not await self._auto_permitted(auto_revision):
+                if generation == self.generation[guild.id]:
+                    self.now[guild.id] = {'title': '자동 등장곡 취소됨', 'status': 'stopped'}
                 return False
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(target, executable=self.settings.ffmpeg, before_options=before, options=f'-vn -t {duration:.3f}'),
@@ -163,25 +181,25 @@ class Player:
         self.now[guild.id] = {'title': title, 'team': team, 'status': 'playing'}
 
     def _event_tracks(self, custom: dict | None) -> list[dict]:
-        if not custom:
-            return []
-        if isinstance(custom.get('tracks'), list):
-            return [dict(x) for x in custom['tracks'] if isinstance(x, dict)][:30]
-        if custom.get('songName') and custom.get('category') == 'situation':
-            return [{'type': 'song', 'songName': custom['songName']}]
-        if custom.get('assetId'):
-            return [{'type': 'asset', 'assetId': custom['assetId'], 'filename': custom.get('filename')}]
-        return []
+        return event_tracks(custom)
 
     async def event(self, guild, team: str, key: str, channel=None):
         custom = await self.store.event(team, key)
+        if custom and custom.get('deleted'):
+            raise ValueError('삭제된 경기 상황입니다. 웹에서 복원한 뒤 재생하세요.')
+        if key not in EVENTS and not (custom and custom.get('isCustom')):
+            raise ValueError('알 수 없는 경기 상황입니다.')
         tracks = self._event_tracks(custom)
         if tracks:
             mode = str((custom or {}).get('playMode') or 'single')
             if mode == 'random':
                 track = random.choice(tracks)
             elif mode == 'sequence':
-                seq_key = (str(team), str(key))
+                seq_key = (guild.id, str(team), str(key))
+                signature = repr(tracks)
+                if self.event_signatures.get(seq_key) != signature:
+                    self.event_sequence[seq_key] = 0
+                    self.event_signatures[seq_key] = signature
                 index = self.event_sequence[seq_key] % len(tracks)
                 self.event_sequence[seq_key] += 1
                 track = tracks[index]
@@ -189,9 +207,9 @@ class Player:
                 track = tracks[0]
 
             if track.get('type') == 'song':
-                song = await self.store.song(team, str(track.get('songName', '')), 'situation')
+                song = await self.store.song(team, str(track.get('songName', '')), song_category(track.get('category', 'situation')))
                 if not song:
-                    raise ValueError('연결된 상황별 노래가 없습니다. 경기 사운드에서 목록을 다시 저장하세요.')
+                    raise ValueError('연결된 라이브러리 곡이 없습니다. 경기 사운드에서 목록을 다시 저장하세요.')
                 return await self.play(guild, team, song, channel=channel)
             if track.get('type') == 'asset':
                 path = self.assets.get(str(track.get('assetId', '')))['path']
@@ -200,6 +218,8 @@ class Player:
         elif custom and custom.get('file'):
             # Legacy file-name based setting.
             path = self.assets.legacy_file(key, custom['file'])
+        elif custom and custom.get('isCustom'):
+            raise ValueError('연결된 곡이 없습니다. 웹 경기 사운드에서 곡을 추가하세요.')
         else:
             files = self.assets.bundled(key)
             if not files:
