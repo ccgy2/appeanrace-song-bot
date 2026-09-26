@@ -20,8 +20,11 @@ function check(rootPath = root) {
   const connectTokens = policies.flatMap(h=>h.value.split(';').map(rule=>rule.trim().split(/\s+/)).filter(t=>t[0]==='connect-src').flatMap(t=>t.slice(1)));
   if (api && !connectTokens.includes(api) && !connectTokens.includes('https://*.up.railway.app')) throw new Error('CSP does not allow the Railway URL. Re-run: python setup_deploy.py');
   if (!api && !connectTokens.includes('https://*.up.railway.app')) throw new Error('Blank API mode requires connect-src https://*.up.railway.app.');
-  for (const name of ['index.html','style.css','app.js','config.js']) if (!fs.existsSync(path.join(rootPath,'static',name))) throw new Error('Missing static file: '+name);
-  const unexpected = fs.readdirSync(path.join(rootPath,'static')).filter(n=>!['index.html','style.css','app.js','config.js','404.html'].includes(n));
+  for (const name of ['index.html','style.css','app.js','config.js','manifest.webmanifest','sw.js','pwa.js','download.html','offline.html']) if (!fs.existsSync(path.join(rootPath,'static',name))) throw new Error('Missing static file: '+name);
+  const unexpected = fs.readdirSync(path.join(rootPath,'static')).filter(n=>!['index.html','style.css','app.js','config.js','404.html','manifest.webmanifest','sw.js','pwa.js','download.html','offline.html','icons'].includes(n));
+  const appManifest=JSON.parse(fs.readFileSync(path.join(rootPath,'static','manifest.webmanifest'),'utf8'));
+  if(appManifest.scope!=='/' || appManifest.start_url!=='/')throw new Error('PWA scope/start URL must share the website root.');
+  for(const icon of appManifest.icons){if(!/^\/icons\/[a-z0-9-]+\.png$/.test(icon.src) || !fs.existsSync(path.join(rootPath,'static',icon.src.slice(1))))throw new Error('Missing or unsafe PWA icon');}
   if (unexpected.length) throw new Error('Unexpected files in public static folder; review before publishing: '+unexpected.join(', '));
   if (!api && manifest.hosting.site !== 'appearance-song') throw new Error('Blank API mode is prepared only for https://appearance-song.web.app.');
   if (!manifest.hosting.site) throw new Error('Firebase Hosting site is not selected.');
