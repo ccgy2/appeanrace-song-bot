@@ -43,3 +43,18 @@ button,a,input,select{touch-action:manipulation}button:focus-visible,a:focus-vis
 
 body{padding-top:env(safe-area-inset-top)}.event-editor-footer{position:sticky;bottom:-26px;background:#161e2a;padding:14px 0;margin-bottom:-10px;z-index:2}.event-editor-footer .tiny{max-width:65%}@media(max-width:760px){.event-editor-footer{bottom:-18px}.event-editor-footer .tiny{max-width:none}}
 .event-editor-footer{bottom:0;margin-bottom:0;padding:12px 0;box-shadow:0 -8px 16px #161e2a} @media(max-width:760px){.event-editor-footer{bottom:0}}
+
+/* Per-song gain is visually separate from the sticky bot/master slider. */
+.track-volume-control{min-width:0;border:1px solid #3b635a;background:#162b2a;border-radius:12px;padding:14px;margin:16px 0}
+.track-volume-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.track-volume-heading label{margin:0;font-size:13px;font-weight:700;color:#b6f4dc;min-width:0;overflow-wrap:anywhere}
+.track-volume-heading button{flex-shrink:0;min-height:36px;padding:6px;font-size:12px}
+.track-volume-inputs{display:grid;grid-template-columns:minmax(50px,1fr) 88px;align-items:center;gap:14px}
+.track-volume-inputs input[type=range]{display:block;width:100%;min-width:0;min-height:36px;margin:0;padding:0;border:0;accent-color:#a8f5d7;cursor:pointer}
+.track-volume-number{display:flex;align-items:center;gap:5px;min-width:0}.track-volume-number input[type=number]{width:66px;min-width:0;max-width:100%;padding:9px 5px;text-align:center;margin:0;background:#111e20;color:#e7fff4;font-variant-numeric:tabular-nums}
+.track-volume-number span{color:#b6f4dc;font-size:12px}.track-volume-control .tiny{margin:9px 0 0;line-height:1.7;overflow-wrap:anywhere}
+.track-volume-control .volume-warning{color:#ffd095}.volume-explainer{line-height:1.8;overflow-wrap:anywhere}.song-volume-badge{color:#b6f4dc;border-color:#3b635a}
+.event-draft-row{flex-wrap:wrap}.event-draft-row .track-volume-control{flex:1 0 100%;margin:6px 0 0;box-sizing:border-box;padding:10px}
+.event-draft-row .event-linked-volume{flex:1 0 100%;margin:2px 0 0;line-height:1.7;color:#acd9c9;overflow-wrap:anywhere}
+#event-default-volume-control{max-width:480px}.event-draft-list{max-height:470px}
+@media(max-width:640px){.track-volume-control{padding:12px}.track-volume-inputs{gap:8px}.track-volume-heading label{font-size:13px}.track-volume-number input[type=number]{font-size:16px!important}.event-draft-list{max-height:430px}.track-volume-heading button{min-height:44px}.track-volume-inputs input[type=range]{min-height:44px}}

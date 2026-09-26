@@ -1,6 +1,6 @@
 /* Public offline page only. Never cache credentials, API responses, uploads or commands. */
 'use strict';
-const CACHE_NAME = 'appearance-public-studio-20260926-1';
+const CACHE_NAME = 'appearance-public-song-volume-20260926-1';
 const PUBLIC_OFFLINE = ['/offline.html','/style.css','/icons/icon-192.png','/icons/icon-512.png','/icons/apple-touch-icon.png'];
 self.addEventListener('install',event=>{
   event.waitUntil(caches.open(CACHE_NAME).then(cache=>cache.addAll(PUBLIC_OFFLINE)));

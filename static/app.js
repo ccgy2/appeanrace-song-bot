@@ -146,7 +146,7 @@ async function checkConnection() {
   node.textContent = '연결 확인 중…'; node.className = ''; help.hidden = true;
   try {
     const r = await api('/api/connection');
-    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('roles-v3') || !r.capabilities?.includes('event-all-categories') || !r.capabilities?.includes('dual-bot') || !r.capabilities?.includes('event-play-modes') || !r.capabilities?.includes('separate-voice-channels')) throw new Error('Railway 봇 서버가 최신 권한·스테이지·경기 사운드 버전이 아닙니다. 이번 봇 패치를 GitHub에 반영하고 Railway를 재배포하세요.');
+    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('song-volume') || !r.capabilities?.includes('roles-v3') || !r.capabilities?.includes('event-all-categories') || !r.capabilities?.includes('dual-bot') || !r.capabilities?.includes('event-play-modes') || !r.capabilities?.includes('separate-voice-channels')) throw new Error('Railway 봇 서버에 곡 자체 볼륨 기능이 아직 없습니다. 이번 봇 패치를 GitHub에 반영하고 Railway를 재배포하세요.');
     const bots = Array.isArray(r.bots) ? r.bots : [];
     const status = bots.map(b=>`${b.name || (b.id==='secondary'?'백팀 봇':'청팀 봇')} ${b.ready?'온라인':'오프라인'}`).join(' · ');
     node.textContent = '웹 연결 정상' + (status ? ' · ' + status : '');
@@ -212,6 +212,43 @@ function bindButton(label, cls, handler) {
   b.addEventListener('click', () => run(b, () => handler(b)));
   return b;
 }
+function requireSongVolumeServer(){
+  if(!state?.songVolumeEnabled)throw new Error('곡 자체 볼륨을 지원하는 봇 패치를 GitHub에 함께 올린 뒤 Railway를 재배포하세요. 아직 저장하지 않았습니다.');
+}
+function trackVolumeValue(record) {
+  const raw=record?.volumePercent ?? 100, value=Number(raw);
+  return (typeof raw==='number' || (typeof raw==='string' && raw.trim()!=='')) && Number.isInteger(value) && value>=0 && value<=200 ? value : 100;
+}
+function volumeControl(id, title, initial=100, onChange=()=>{}) {
+  const box=el('div',null,'track-volume-control');box.id=id+'-control';
+  const header=el('div',null,'track-volume-heading'),label=el('label',title);
+  label.htmlFor=id;header.append(label);
+  const reset=bindButton('100%로','text-button',()=>setValue(100,true));reset.setAttribute('aria-label',title+' 100%로 초기화');header.append(reset);box.append(header);
+  const inputs=el('div',null,'track-volume-inputs'),range=el('input'),number=el('input'),unit=el('span','%');
+  range.id=id;range.type='range';number.id=id+'-number';number.type='number';number.inputMode='numeric';number.required=true;
+  for(const input of [range,number]){input.min='0';input.max='200';input.step='1';input.setAttribute('aria-label',title+(input===number?' 숫자 입력':''));input.setAttribute('aria-describedby',id+'-hint');}
+  const numeric=el('div',null,'track-volume-number');numeric.append(number,unit);inputs.append(range,numeric);box.append(inputs);
+  const hint=el('p','0% 무음 · 100% 원래 크기 · 200%까지 증폭','tiny');hint.id=id+'-hint';box.append(hint);
+  const warning=el('p','100%를 넘기면 큰 부분에서 소리가 찌그러질 수 있어요. 조금씩 올려 확인하세요.','tiny volume-warning');box.append(warning);
+  function setValue(value,notify=false){
+    const v=trackVolumeValue({volumePercent:value});range.value=String(v);number.value=String(v);number.setCustomValidity('');warning.hidden=v<=100;
+    if(notify)onChange(v);
+  }
+  range.addEventListener('input',()=>setValue(Number(range.value),true));
+  number.addEventListener('input',()=>{
+    number.setCustomValidity('');
+    if(!number.checkValidity()){warning.hidden=true;return;}
+    const v=Number(number.value);range.value=String(v);warning.hidden=v<=100;onChange(v);
+  });
+  setValue(initial);
+  return {node:box,setValue,getValue(){
+    if(!number.reportValidity())throw new Error('곡 자체 볼륨은 0~200 사이의 정수(%)로 입력하세요.');
+    return Number(number.value);
+  }};
+}
+const songVolumeControl=volumeControl('song-volume','곡 자체 볼륨');
+$('#song-volume-slot').append(songVolumeControl.node);
+
 function context() {
   return {botTarget:selectedBot, guildId:selectedGuild, team:selectedTeam, channelId:$('#voice-select').value || null};
 }
@@ -234,7 +271,7 @@ function setSource(value) {
 }
 function resetEditor() {
   uploadTicket++; uploading = false; assetId = ''; editingName = null;
-  $('#song-form').reset(); $('#song-name').readOnly = false;
+  $('#song-form').reset(); songVolumeControl.setValue(100); $('#song-name').readOnly = false;
   $('#editor-title').textContent = '새 '+categoryNames[currentCategory]+' 등록';
   $('#rename-help').hidden = true;
   $('#save-song').textContent = '＋ '+categoryNames[currentCategory]+' 저장'; $('#save-song').disabled = false;
@@ -245,7 +282,7 @@ function resetEditor() {
 }
 async function editSong(song) {
   resetEditor();
-  editingName=song.name;
+  editingName=song.name; songVolumeControl.setValue(trackVolumeValue(song));
   $('#song-name').value = song.name; $('#song-name').readOnly = false;
   $('#rename-help').hidden=false;
   $('#rename-help').textContent=currentCategory==='entrance'
@@ -314,7 +351,9 @@ function drawLive(s) {
   $('#voice-detail').textContent = voice?.connected ? (voice.stageAudience ? '스테이지 청중 상태 · 관리자가 발언자로 전환한 후 다시 재생하세요.' : voice.serverMuted ? '서버 음소거를 해제해주세요.' : `${voice.stage?'스테이지 발언자':'음성 연결'} 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
   $('#voice-error').hidden = !voice?.error; $('#voice-error').textContent = voice?.error || '';
   $('#playing-title').textContent = s.nowPlaying?.title || '재생 대기 중';
-  $('#playing-status').textContent = s.nowPlaying?.error || statusNames[s.nowPlaying?.status] || 'Discord 통화방에서 재생됩니다';
+  const now=s.nowPlaying;
+  const levels=now?.status==='playing' && Number.isFinite(now.songVolumePercent) ? ` · 곡 ${now.songVolumePercent}% × 봇 ${now.masterVolumePercent}%` : '';
+  $('#playing-status').textContent = now?.error || (statusNames[now?.status] ? statusNames[now.status]+levels : 'Discord 통화방에서 재생됩니다');
   if (document.activeElement !== $('#volume')) { $('#volume').value = Math.round(s.state.volume * 100); $('#volume-value').textContent = $('#volume').value + '%'; }
   drawAutoEntrance(s.autoEntrance);
   const off = !s.ready || !canPlay();
@@ -354,6 +393,7 @@ async function loadState(full = true) {
   const durableRailway = s.storage === 'local' && s.fileStorage?.persistent === true;
   $('#storage-badge').textContent = s.storage === 'firebase' ? '곡 정보: Firebase' : (durableRailway ? '곡 정보: Railway SQLite' : '곡 정보: 로컬 DB');
   const notes = [];
+  if(!s.songVolumeEnabled)notes.push('곡 자체 볼륨을 사용하려면 봇 패치도 적용해야 합니다. 이 상태에서는 새 음악/경기 사운드 저장을 차단합니다.');
   if (s.webOnly) notes.push('웹 확인 모드입니다. 실제 접속·재생은 WEB_ONLY=false로 바꾸고 봇을 실행하세요.');
   else if (!s.ready) notes.push('봇이 Discord에 연결되지 않았습니다. 토큰·실행 로그를 확인하세요. 곡 등록은 가능합니다.');
   if (s.storage === 'local' && !durableRailway) notes.push('로컬 저장 모드: 재배포 시 파일을 유지하려면 DATA_DIR에 영구 저장소가 필요합니다.');
@@ -383,6 +423,7 @@ function renderSongs() {
     content.append(el('h4',song.name,'song-name'));
     const meta = el('div',null,'song-meta');
     meta.append(el('span',song.source === 'upload' ? 'FILE' : 'YOUTUBE','song-tag'),el('span',`${fmt(song.start)} — ${fmt(song.end)} · ${Math.round((timeValue(song.end)-timeValue(song.start))*100)/100}초`));
+    meta.append(el('span',`곡 ${trackVolumeValue(song)}%`,'song-tag song-volume-badge'));
     if (song.memberId) meta.append(el('span','ID 연결','song-tag'));
     if (song.fileMissing) meta.append(el('span','파일 없음','error-text'));
     content.append(meta);
@@ -455,7 +496,7 @@ $('#auto-entrance-toggle').addEventListener('click',()=>run(null,async()=>{
 function eventTracks(event) {
   if(Array.isArray(event.custom?.tracks))return event.custom.tracks.map(t=>({...t, ...(t.type==='song'?{category:t.category || 'situation'}:{})}));
   if(event.custom?.songName)return [{type:'song',category:event.custom.category || 'situation',songName:event.custom.songName}];
-  if(event.custom?.assetId)return [{type:'asset',assetId:event.custom.assetId,filename:event.custom.filename || '업로드 오디오'}];
+  if(event.custom?.assetId)return [{type:'asset',assetId:event.custom.assetId,filename:event.custom.filename || '업로드 오디오',volumePercent:trackVolumeValue(event.custom)}];
   return [];
 }
 function eventModeName(mode){return {single:'단곡',random:'랜덤',sequence:'순서대로 1곡씩'}[mode] || '단곡';}
@@ -475,7 +516,7 @@ function renderEvents() {
     heading.append(el('h3',event.label),el('span',event.customEvent?'직접 추가':'기본 상황','badge'));
     card.append(heading);
     const tracks=eventTracks(event),mode=event.custom?.playMode || 'single';
-    card.append(el('p',tracks.length?`${eventModeName(mode)} · ${tracks.length}곡 연결됨`:event.customEvent?'연결된 곡 없음':`기본 효과음 ${event.bundledCount}개 · 무작위 재생`,'tiny event-summary'));
+    card.append(el('p',tracks.length?`${eventModeName(mode)} · ${tracks.length}곡 연결됨`:event.customEvent?'연결된 곡 없음':event.custom?.file?`지정 파일 · ${event.custom.file} · 곡 ${trackVolumeValue(event.custom)}%`:`기본 효과음 ${event.bundledCount}개 · 무작위 재생 · 곡 ${trackVolumeValue(event.custom)}%`,'tiny event-summary'));
     if(tracks.length){const preview=el('p',tracks.slice(0,3).map(eventTrackLabel).join(' · ')+(tracks.length>3?` 외 ${tracks.length-3}곡`:''),'event-track-preview');card.append(preview);}
     const actions=el('div',null,'event-card-actions');
     if(canPlay())actions.append(bindButton('▶ 상황 재생','soft',()=>control('event',{key:event.key})));
@@ -509,7 +550,8 @@ function openEventEditor(event){
   if(!canEditMusic())return;
   const library=Object.entries(categoryNames).flatMap(([category])=>categorySongs(category).map(s=>({type:'song',category,songName:s.name})));
   eventDraft={team:selectedTeam,key:event.key,label:event.label,customEvent:!!event.customEvent,tracks:eventTracks(event),
-    playMode:event.custom?.playMode || 'single',library,selected:new Set(),dirty:false,busy:false,
+    playMode:event.custom?.playMode || 'single',volumePercent:trackVolumeValue(event.custom),library,selected:new Set(),dirty:false,busy:false,
+    legacyFile:event.custom?.file || '',useBundled:false,
     max:state.maxEventTracks || 100,uploadsAllowed:state.fileStorage?.uploadsAllowed!==false};
   const box=$('#event-editor-content');box.replaceChildren();
   const header=el('div',null,'event-editor-header'),titles=el('div');
@@ -523,6 +565,11 @@ function openEventEditor(event){
   fillSelect(mode,['single','random','sequence'].map(id=>({id,name:eventModeName(id)})),eventDraft.playMode);
   mode.addEventListener('change',()=>{eventDraft.playMode=mode.value;eventDraft.dirty=true;updateEventDraftCount();});modeLabel.append(mode);metadata.append(modeLabel);box.append(metadata);
   const help=el('p',null,'notice');help.id='event-mode-help';box.append(help);
+  if(!event.customEvent){
+    const defaults=volumeControl('event-default-volume',eventDraft.legacyFile?'기존 지정 효과음 볼륨':'기본 효과음 볼륨',eventDraft.volumePercent,v=>{eventDraft.volumePercent=v;eventDraft.dirty=true;});
+    box.append(defaults.node);
+  }
+  box.append(el('p','라이브러리 곡은 저장된 곡 볼륨을 그대로 사용합니다. 아래에서 직접 업로드한 파일은 각각 조절하세요. 볼륨은 저장 후 다음 재생부터 적용됩니다.','tiny volume-explainer'));
   const panes=el('div',null,'event-editor-panes');
   const left=el('section',null,'event-picker-pane');left.append(el('h3','01 · 라이브러리에서 여러 곡 선택'));
   const filters=el('div',null,'event-picker-filters');
@@ -545,7 +592,7 @@ function openEventEditor(event){
   const queue=el('div',null,'event-draft-list');queue.id='event-draft-list';right.append(queue);
   const clear=bindButton(event.customEvent?'연결 목록 비우기':'목록 비우고 기본 효과음 사용','ghost delete',()=>{
     if(!confirm('연결한 곡 목록을 비울까요? 원본 곡은 삭제하지 않습니다.'))return;
-    eventDraft.tracks=[];eventDraft.dirty=true;renderEventDraftList();renderEventChoices();
+    eventDraft.tracks=[];eventDraft.useBundled=true;eventDraft.dirty=true;renderEventDraftList();renderEventChoices();
   });right.append(clear);
   const drop=el('div',null,'event-file-drop');drop.id='event-file-drop';
   const fileLabel=el('label','여러 오디오 파일을 여기에 놓거나 선택하세요'),file=el('input');
@@ -581,6 +628,7 @@ function renderEventChoices(){
 }
 function updateEventDraftCount(){
   $('#event-draft-count').textContent=`${eventDraft.tracks.length} / ${eventDraft.max}곡`;
+  const defaults=$('#event-default-volume-control');if(defaults)defaults.hidden=eventDraft.tracks.length>0;
   $('#event-mode-help').textContent={single:'단곡: 연결 순서의 첫 번째 곡만 재생합니다.',random:'랜덤: 연결한 곡 중 하나를 매번 무작위로 재생합니다.',sequence:'순서: 상황 재생 버튼을 누를 때마다 다음 1곡으로 넘어갑니다. 끝나면 첫 곡으로 돌아갑니다.'}[eventDraft.playMode];
 }
 function addEventDraftTracks(tracks){
@@ -597,7 +645,10 @@ function renderEventDraftList(){
   if(!eventDraft)return;const list=$('#event-draft-list');list.replaceChildren();updateEventDraftCount();
   eventDraft.tracks.forEach((track,index)=>{
     const row=el('div',null,'event-draft-row');row.draggable=!eventDraft.busy;row.dataset.index=index;
-    const handle=el('span','⠿','drag-handle');handle.setAttribute('aria-hidden','true');
+    // Keep whole-row dragging, but never steal a range slider/number/button gesture.
+    row.addEventListener('pointerdown',e=>{row.draggable=!eventDraft.busy && !e.target.closest('input,button,select,.track-volume-control');});
+    for(const name of ['pointerup','pointercancel'])row.addEventListener(name,()=>{row.draggable=!eventDraft?.busy;});
+    const handle=el('span','⠿','drag-handle');handle.draggable=!eventDraft.busy;handle.title='이 손잡이를 끌어 순서 변경';handle.setAttribute('aria-hidden','true');
     row.append(handle,el('span',`${index+1}. ${eventTrackLabel(track)}`,'event-draft-title'));
     const controls=el('div',null,'event-order-actions');
     const up=bindButton('↑','ghost',()=>moveEventTrack(index,index-1));up.setAttribute('aria-label',`${eventTrackLabel(track)} 위로`);up.disabled=index===0;
@@ -607,9 +658,16 @@ function renderEventDraftList(){
     row.addEventListener('dragend',()=>row.classList.remove('dragging'));
     row.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('application/x-appearance-track')){e.preventDefault();e.dataTransfer.dropEffect='move';}});
     row.addEventListener('drop',e=>{e.preventDefault();const data=e.dataTransfer.getData('application/x-appearance-track');if(/^\d+$/.test(data))moveEventTrack(Number(data),index);});
+    if(track.type==='asset'){
+      const volume=volumeControl('event-track-volume-'+index,'이 파일 볼륨',trackVolumeValue(track),v=>{track.volumePercent=v;eventDraft.dirty=true;});
+      row.append(volume.node);
+    }else{
+      const song=categorySongs(track.category || 'situation').find(s=>s.name===track.songName);
+      row.append(el('p',`곡 ${trackVolumeValue(song)}% · 음악 라이브러리의 ‘수정’에서 변경`,'tiny event-linked-volume'));
+    }
     list.append(row);
   });
-  if(!eventDraft.tracks.length)list.append(el('p',eventDraft.customEvent?'왼쪽에서 곡을 추가하거나 아래로 파일을 놓으세요.':'비워서 저장하면 이 상황의 기본 효과음으로 돌아갑니다.','tiny'));
+  if(!eventDraft.tracks.length)list.append(el('p',eventDraft.customEvent?'왼쪽에서 곡을 추가하거나 아래로 파일을 놓으세요.':eventDraft.legacyFile && !eventDraft.useBundled?`기존 지정 파일: ${eventDraft.legacyFile}. 볼륨만 저장해도 이 파일을 유지합니다.`:'비워서 저장하면 이 상황의 기본 효과음으로 돌아갑니다.','tiny'));
 }
 function setEventEditorBusy(busy){
   if(!eventDraft)return;eventDraft.busy=busy;
@@ -631,7 +689,7 @@ async function uploadEventFiles(files){
       try{
         const result=await uploadFile(file,value=>{progress.value=(i+value/100)/files.length*100;});
         if(eventDraft!==draft || !csrf)break;
-        draft.tracks.push({type:'asset',assetId:result.id,filename:result.name || file.name});draft.dirty=true;success++;
+        draft.tracks.push({type:'asset',assetId:result.id,filename:result.name || file.name,volumePercent:100});draft.dirty=true;success++;
       }catch(err){errors.push(`${file.name}: ${err.message}`);}
       progress.value=(i+1)/files.length*100;
     }
@@ -641,11 +699,18 @@ async function uploadEventFiles(files){
 }
 async function saveEventDraft(){
   const draft=eventDraft;if(!draft || draft.busy)return;
+  requireSongVolumeServer();
   if(draft.customEvent && !draft.label.trim())throw new Error('상황 이름을 입력하세요.');
+  for(const input of $$('#event-editor-dialog .track-volume-control input[type=number]')){
+    if(!input.closest('[hidden]') && !input.reportValidity())throw new Error('곡 자체 볼륨은 0~200 사이의 정수(%)로 입력하세요.');
+  }
   setEventEditorBusy(true);
   try{
-    await api('/api/events','PUT',{team:draft.team,key:draft.key,tracks:draft.tracks,playMode:draft.playMode,...(draft.customEvent?{label:draft.label.trim()}:{})});
-    draft.dirty=false;eventDialog.close();eventDraft=null;await loadState();toast('경기 사운드와 재생 순서를 저장했습니다.');
+    const keepLegacy=draft.legacyFile && !draft.useBundled && !draft.tracks.length;
+    await api('/api/events','PUT',{team:draft.team,key:draft.key,
+      ...(keepLegacy?{}:{tracks:draft.tracks,playMode:draft.playMode}),
+      volumePercent:draft.volumePercent,...(draft.customEvent?{label:draft.label.trim()}:{})});
+    draft.dirty=false;eventDialog.close();eventDraft=null;await loadState();toast('경기 사운드·순서·곡 볼륨을 저장했습니다. 다음 재생부터 적용됩니다.');
   }finally{if(eventDraft===draft)setEventEditorBusy(false);}
 }
 
@@ -719,14 +784,15 @@ for(const name of ['dragleave','drop'])drop.addEventListener(name,e=>{e.preventD
 drop.addEventListener('drop',e=>{const file=e.dataTransfer.files[0];if(file)selectSongFile(file);});
 $('#song-form').addEventListener('submit',e=>{
   e.preventDefault();run($('#save-song'),async()=>{
+    requireSongVolumeServer();
     if(uploading)throw new Error('파일 업로드가 끝난 다음 저장하세요.');
     if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
     const name=$('#song-name').value.trim(), category=currentCategory, team=selectedTeam, ticket=uploadTicket;
     if(editingName===null && categorySongs().some(s=>s.name===name) && !confirm('같은 종류에 같은 이름의 곡이 있습니다. 덮어쓸까요?'))return;
     const result=await api('/api/songs','POST',{team,name,category,oldName:editingName,
-      url:$('#song-url').value,source,assetId,start:$('#song-start').value,end:$('#song-end').value,memberId:$('#member-id').value});
+      url:$('#song-url').value,source,assetId,volumePercent:songVolumeControl.getValue(),start:$('#song-start').value,end:$('#song-end').value,memberId:$('#member-id').value});
     if(ticket===uploadTicket)resetEditor();
-    await loadState();toast(result.warning || categoryNames[category]+'를 저장했습니다. 닉네임 변경도 반영됐어요.',!!result.warning);
+    await loadState();toast(result.warning || categoryNames[category]+'와 곡 볼륨을 저장했습니다. 다음 재생부터 적용됩니다.',!!result.warning);
   });
 });
 $$('[data-category]').forEach(button=>button.addEventListener('click',()=>setCategory(button.dataset.category)));
