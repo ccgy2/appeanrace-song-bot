@@ -18,7 +18,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 from aiohttp import web
 from config import ROOT, normalize_origin
-from validation import EVENTS, clean_name, validate_song, song_category, SONG_CATEGORIES
+from validation import EVENTS, clean_name, validate_song, song_category, SONG_CATEGORIES, volume_percent, saved_volume_percent
 from persistence import storage_status
 from backups import write_music_backup
 from permissions import allowed, required_capability, ROLE_LABELS, ROLE_CAPABILITIES
@@ -302,8 +302,8 @@ class WebPanel:
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
         bots = self.bot_targets()
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
-                         'authMode': 'bearer', 'web': 'ok', 'build': 'studio-20260926-1',
-                         'capabilities': ['library-categories', 'atomic-rename', 'storage-check',
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'song-volume-20260926-1',
+                         'capabilities': ['song-volume', 'event-track-volume', 'library-categories', 'atomic-rename', 'storage-check',
                                           'roles-v3', 'global-autoplay', 'stage-voice', 'event-all-categories', 'event-delete-restore', 'original-name-backup', 'pwa', 'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
                              x['id'] == 'secondary' and x['ready'] for x in bots),
@@ -468,6 +468,7 @@ class WebPanel:
                 'state': state,
                 'events': self._event_rows(events),
                 'deletedEvents': [{'key': k, 'label': d.get('label') or EVENTS.get(k, k)} for k, d in events.items() if d.get('deleted')],
+                'songVolumeEnabled': True,
                 'maxEventTracks': MAX_EVENT_TRACKS,
                 'maxUploadMb': self.s.max_upload_mb,
             }
@@ -500,17 +501,20 @@ class WebPanel:
     def _event_tracks(self, doc: dict | None) -> list[dict]:
         return event_tracks(doc)
 
-    async def _validated_event_tracks(self, team: str, value) -> list[dict]:
+    async def _validated_event_tracks(self, team: str, value, previous: dict | None = None) -> list[dict]:
         if not isinstance(value, list):
             raise ValueError('경기 상황 곡 목록이 올바르지 않습니다.')
         if len(value) > MAX_EVENT_TRACKS:
             raise ValueError(f'한 경기 상황에는 최대 {MAX_EVENT_TRACKS}곡까지 넣을 수 있습니다.')
         result, seen = [], set()
+        old_assets = {t['assetId']: t for t in self._event_tracks(previous) if t['type'] == 'asset'}
         for raw in value:
             if not isinstance(raw, dict):
                 raise ValueError('경기 상황 곡 정보가 올바르지 않습니다.')
             kind = str(raw.get('type', ''))
             if kind == 'song':
+                if 'volumePercent' in raw:
+                    raise ValueError('라이브러리 곡의 볼륨은 음악 라이브러리에서 수정하세요. 연결에는 중복 적용하지 않습니다.')
                 name = clean_name(raw.get('songName'), '곡 이름')
                 category = song_category(raw.get('category', 'situation'))
                 if not await self.store.song(team, name, category):
@@ -520,7 +524,9 @@ class WebPanel:
             elif kind == 'asset':
                 meta = self.assets.get(str(raw.get('assetId', '')))
                 ident = ('asset', meta['id'])
-                item = {'type': 'asset', 'assetId': meta['id'], 'filename': meta['name']}
+                percent = (volume_percent(raw['volumePercent']) if 'volumePercent' in raw
+                           else saved_volume_percent(old_assets.get(meta['id'])))
+                item = {'type': 'asset', 'assetId': meta['id'], 'filename': meta['name'], 'volumePercent': percent}
             else:
                 raise ValueError('경기 상황에는 등장곡·응원가·상황별 노래 또는 업로드 오디오를 넣을 수 있습니다.')
             if ident in seen:
@@ -688,6 +694,8 @@ class WebPanel:
         if current and current.get('deleted'):
             raise ValueError('삭제된 경기 상황입니다. 먼저 복원하세요.')
 
+        percent = (volume_percent(data['volumePercent']) if 'volumePercent' in data
+                   else saved_volume_percent(current))
         base = {}
         if custom_event:
             base = {'label': clean_name(current.get('label') or key, '상황 이름'), 'isCustom': True}
@@ -710,14 +718,19 @@ class WebPanel:
             mode = str(data.get('playMode') or previous_source.get('playMode') or 'single')
             if mode not in {'single', 'random', 'sequence'}:
                 raise ValueError('재생 방식은 단곡, 랜덤, 여러곡 순차 중에서 선택하세요.')
-            tracks = (await self._validated_event_tracks(team, data['tracks'])
+            tracks = (await self._validated_event_tracks(team, data['tracks'], current)
                       if 'tracks' in data else self._event_tracks(current))
             if not tracks and not custom_event:
                 # Built-in situation with an empty list means restore bundled default sounds.
-                await self.store.set_event(team, key, None)
+                await self.store.set_event(team, key, {'volumePercent': percent} if percent != 100 else None)
             else:
-                await self.store.set_event(team, key, {**base, 'playMode': mode, 'tracks': tracks})
+                await self.store.set_event(team, key, {**base, 'playMode': mode, 'tracks': tracks, 'volumePercent': percent})
             return response({'ok': True, 'playMode': mode, 'trackCount': len(tracks)})
+
+        # Gain-only request for bundled/legacy event audio. No track list is lost.
+        if 'volumePercent' in data and not any(k in data for k in ('assetId', 'songName')):
+            await self.store.set_event(team, key, {**base, **previous_source, 'volumePercent': percent})
+            return response({'ok': True})
 
         # Backward compatibility with the previous website/API.
         asset = data.get('assetId')
@@ -731,9 +744,12 @@ class WebPanel:
                                                     'songName': name, 'category': category})
         elif asset:
             meta = self.assets.get(str(asset))
+            if 'volumePercent' not in data:
+                matching = next((t for t in self._event_tracks(current) if t.get('assetId') == meta['id']), None)
+                percent = saved_volume_percent(matching)
             await self.store.set_event(team, key, {**base, 'playMode': 'single',
-                                                    'tracks': [{'type': 'asset', 'assetId': meta['id'], 'filename': meta['name']}],
-                                                    'assetId': meta['id'], 'filename': meta['name']})
+                                                    'tracks': [{'type': 'asset', 'assetId': meta['id'], 'filename': meta['name'], 'volumePercent': percent}],
+                                                    'assetId': meta['id'], 'filename': meta['name'], 'volumePercent': percent})
         elif custom_event and 'label' in data and 'assetId' not in data and 'songName' not in data:
             # Rename only: preserve every connected track and playback mode.
             await self.store.set_event(team, key, {**base, **previous_source})

@@ -16,7 +16,7 @@ from storage import Store
 from validation import youtube_url, time_range
 from voice import VoiceManager, VoiceError
 from event_tracks import event_tracks
-from validation import EVENTS, song_category
+from validation import EVENTS, song_category, saved_volume_percent
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +90,20 @@ class Player:
         setting = await self.store.playback_settings()
         return setting['enabled'] and setting['revision'] == revision
 
+    def _source(self, target, *, before: str, options: str, master: float, record: dict | None, team: str):
+        percent = saved_volume_percent(record)
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(str(target), executable=self.settings.ffmpeg,
+                                  before_options=before, options=options),
+            volume=master * percent / 100,
+        )
+        # The single PCM multiplication avoids clipping a boosted track BEFORE
+        # a low master gain is applied. Master edits must retain the track gain.
+        source.appearance_song_percent = percent
+        source.appearance_master_volume = master
+        source.appearance_team = team
+        return source
+
     async def play(self, guild, team: str, song: dict, channel=None, order=None, preview=False, *, auto_revision=None):
         if not await self._auto_permitted(auto_revision):
             return False
@@ -147,10 +161,8 @@ class Player:
                 if generation == self.generation[guild.id]:
                     self.now[guild.id] = {'title': '자동 등장곡 취소됨', 'status': 'stopped'}
                 return False
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(target, executable=self.settings.ffmpeg, before_options=before, options=f'-vn -t {duration:.3f}'),
-                volume=state['volume'],
-            )
+            source = self._source(target, before=before, options=f'-vn -t {duration:.3f}',
+                                  master=state['volume'], record=song, team=team)
             self._start(guild, vc, source, generation, song.get('name', '등장곡'), team)
             if order is not None:
                 await self.store.set_order(team, int(order))
@@ -178,7 +190,9 @@ class Player:
         except BaseException:
             source.cleanup()
             raise
-        self.now[guild.id] = {'title': title, 'team': team, 'status': 'playing'}
+        self.now[guild.id] = {'title': title, 'team': team, 'status': 'playing',
+                              'songVolumePercent': source.appearance_song_percent,
+                              'masterVolumePercent': round(source.appearance_master_volume * 100)}
 
     def _event_tracks(self, custom: dict | None) -> list[dict]:
         return event_tracks(custom)
@@ -190,13 +204,15 @@ class Player:
         if key not in EVENTS and not (custom and custom.get('isCustom')):
             raise ValueError('알 수 없는 경기 상황입니다.')
         tracks = self._event_tracks(custom)
+        gain_record = custom
         if tracks:
             mode = str((custom or {}).get('playMode') or 'single')
             if mode == 'random':
                 track = random.choice(tracks)
             elif mode == 'sequence':
                 seq_key = (guild.id, str(team), str(key))
-                signature = repr(tracks)
+                # Editing gain alone must not restart an event's sequence.
+                signature = repr([(t.get('type'), t.get('category'), t.get('songName'), t.get('assetId')) for t in tracks])
                 if self.event_signatures.get(seq_key) != signature:
                     self.event_sequence[seq_key] = 0
                     self.event_signatures[seq_key] = signature
@@ -212,6 +228,7 @@ class Player:
                     raise ValueError('연결된 라이브러리 곡이 없습니다. 경기 사운드에서 목록을 다시 저장하세요.')
                 return await self.play(guild, team, song, channel=channel)
             if track.get('type') == 'asset':
+                gain_record = track
                 path = self.assets.get(str(track.get('assetId', '')))['path']
             else:
                 raise ValueError('경기 상황에 연결된 오디오 정보가 올바르지 않습니다.')
@@ -236,10 +253,8 @@ class Player:
             return False
         if guild.me.voice and guild.me.voice.mute:
             raise VoiceError('봇의 서버 음소거를 해제하세요.')
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(str(path), executable=self.settings.ffmpeg, before_options='-nostdin -protocol_whitelist file,pipe', options='-vn'),
-            volume=state['volume'],
-        )
+        source = self._source(path, before='-nostdin -protocol_whitelist file,pipe', options='-vn',
+                              master=state['volume'], record=gain_record, team=team)
         self._start(guild, vc, source, generation, path.name, team)
         return True
 
@@ -249,7 +264,17 @@ class Player:
         await self.store.set_volume(team, value / 100)
         vc = guild.voice_client
         if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
-            vc.source.volume = value / 100
+            source = vc.source
+            # An editor may be viewing a different team from the song now playing.
+            if getattr(source, 'appearance_team', team) != team:
+                return
+            percent = getattr(source, 'appearance_song_percent', 100)
+            source.volume = (value / 100) * (percent / 100)
+            source.appearance_master_volume = value / 100
+            current = self.now.get(guild.id)
+            if current and current.get('status') == 'playing':
+                current['masterVolumePercent'] = value
+                current['songVolumePercent'] = percent
 
     async def close(self):
         if self.extract_tasks:

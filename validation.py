@@ -24,6 +24,27 @@ def song_category(value: object = 'entrance') -> str:
     return value
 
 
+def volume_percent(value: object) -> int:
+    """Per-record gain, never the shared bot/master volume. Strict on writes."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError('곡 자체 볼륨은 0~200 사이의 정수(%)로 입력하세요.')
+    try:
+        number = float(value)
+        if not math.isfinite(number) or not 0 <= number <= 200 or not number.is_integer():
+            raise ValueError
+        return int(number)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError('곡 자체 볼륨은 0~200 사이의 정수(%)로 입력하세요.') from None
+
+
+def saved_volume_percent(record: dict | None) -> int:
+    """Old records have unity gain; malformed imported metadata fails safely to 100%."""
+    try:
+        return volume_percent((record or {}).get('volumePercent', 100))
+    except ValueError:
+        return 100
+
+
 def clean_name(value: object, label: str = '이름') -> str:
     text = str(value or '').strip()
     if not 1 <= len(text) <= 64 or any(ord(c) < 32 for c in text):
@@ -97,6 +118,9 @@ def validate_song(data: dict) -> dict:
     a, b = time_range(data.get('start', 0), data.get('end', 30))
     source = data.get('source', 'youtube')
     out = {'name': name, 'category': category, 'start': a, 'end': b, 'memberId': member_id(data.get('memberId')), 'source': source}
+    # Omission by an older client must preserve a previously saved level.
+    if 'volumePercent' in data:
+        out['volumePercent'] = volume_percent(data['volumePercent'])
     if source == 'youtube':
         out['url'] = youtube_url(data.get('url'))
     elif source == 'upload':

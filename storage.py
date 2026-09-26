@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any
 from config import Settings
-from validation import clean_name, song_category, SONG_COLLECTIONS, SONG_CATEGORIES
+from validation import clean_name, song_category, SONG_COLLECTIONS, SONG_CATEGORIES, volume_percent, saved_volume_percent
 
 log = logging.getLogger(__name__)
 LOCAL_SQLITE_LOCK = threading.RLock()
@@ -213,7 +213,7 @@ class Store:
     async def songs(self, team: str, category: str = 'entrance') -> list[dict]:
         category = song_category(category)
         rows = await self._run(self._list, f'teams/{clean_name(team)}/{SONG_COLLECTIONS[category]}')
-        return sorted([{'source': 'youtube', **d, 'name': d['id'], 'category': category} for d in rows], key=lambda d: d['name'])
+        return sorted([{'source': 'youtube', **d, 'name': d['id'], 'category': category, 'volumePercent': saved_volume_percent(d)} for d in rows], key=lambda d: d['name'])
 
     async def library(self, team: str) -> dict[str, list[dict]]:
         return {category: await self.songs(team, category) for category in SONG_CATEGORIES}
@@ -221,7 +221,7 @@ class Store:
     async def song(self, team: str, name: str, category: str = 'entrance') -> dict | None:
         category, name = song_category(category), clean_name(name)
         d = await self._run(self._read, f'teams/{clean_name(team)}/{SONG_COLLECTIONS[category]}/{name}')
-        return {'source': 'youtube', **d, 'name': name, 'category': category} if d is not None else None
+        return {'source': 'youtube', **d, 'name': name, 'category': category, 'volumePercent': saved_volume_percent(d)} if d is not None else None
 
     def _song_reference_writes(self, root: str, category: str, old: str, new: str | None):
         """Run under the same store lock/atomic batch as the song rename/delete."""
@@ -268,6 +268,8 @@ class Store:
         team, name = clean_name(team), clean_name(song['name'])
         category = song_category(song.get('category', 'entrance'))
         old = clean_name(old_name) if old_name is not None else None
+        if 'volumePercent' in song:
+            volume_percent(song['volumePercent'])  # Discord/internal writers use the same bounds.
         await self.create_team(team)
         def work():
             root = f'teams/{team}'
@@ -278,6 +280,7 @@ class Store:
             if old is not None and old != name and self._read(f'{prefix}/{name}') is not None:
                 raise ValueError('같은 종류에 새 닉네임 / 이름의 곡이 이미 있습니다. 다른 이름을 입력하세요.')
             data = {**(previous or {}), **{k: v for k, v in song.items() if k not in {'name', 'id', 'category'}}}
+            data['volumePercent'] = saved_volume_percent(data)
             if data.get('source', 'youtube') == 'youtube':
                 data.pop('assetId', None)
             else:
