@@ -173,7 +173,7 @@ class LinkedAPIRegressionTests(unittest.IsolatedAsyncioTestCase):
         r=await self.client.get('/api/connection',headers={'Origin':FRONT})
         self.assertEqual(r.status,200)
         d=await r.json()
-        self.assertEqual(d['build'],'studio-20260926-1')
+        self.assertEqual(d['build'],'song-volume-20260926-1')
         for forbidden in ['accessToken','password','songs','guilds','firebase_key']:
             self.assertNotIn(forbidden,d)
         for path in ['/.env','/deployment-link.json','/config.py','/webapp.py']:
