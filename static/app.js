@@ -6,6 +6,9 @@ let source = 'youtube', assetId = '', uploading = false, toastTimer, previewAudi
 let stateTicket = 0, uploadTicket = 0, previewTicket = 0;
 let accessToken = '', apiBase = '', configError = '', currentUser = null;
 let currentCategory = 'entrance', editingName = null;
+const roleNames = {admin:'관리자',registrar:'등장곡 등록/삭제자',player:'등장곡 재생자',user:'유저',pending:'승인 대기'};
+function canPlay() { return ['admin','registrar','player'].includes(currentUser?.role); }
+function canEditMusic() { return ['admin','registrar'].includes(currentUser?.role); }
 const categoryNames = {entrance:'등장곡', cheer:'응원가', situation:'상황별 노래'};
 function categorySongs(category = currentCategory) { return state?.library?.[category] || (category === 'entrance' ? state?.songs || [] : []); }
 function workspaceKey() { return 'appearance:workspace:v2:' + apiBase + ':' + (currentUser?.username || ''); }
@@ -35,7 +38,7 @@ function updateCategory() {
   $('#song-name-label').textContent=entrance?'선수 닉네임':'닉네임 / 곡 이름';
   $('#song-name').placeholder=entrance?'예: 김선수':currentCategory==='cheer'?'예: 김선수 또는 팀 응원가':'예: 홈런 축하곡';
   $('#auto-song-settings').hidden=!entrance;
-  $('#category-description').textContent=entrance?'사용자 ID가 연결된 등장곡만 통화방 입장 시 자동 재생됩니다.':'별도 라이브러리에 저장됩니다. 웹의 재생 버튼으로 틀 수 있고, 상황별 노래는 관리자가 경기 사운드에 연결할 수 있습니다.';
+  $('#category-description').textContent=entrance?'사용자 ID가 연결된 등장곡만 통화방 입장 시 자동 재생됩니다.':'별도 라이브러리에 저장됩니다. 웹의 재생 버튼으로 틀 수 있고, 세 종류 모두 등록/삭제자가 경기 사운드에 함께 연결할 수 있습니다.';
 }
 function setCategory(category) {
   if(!Object.hasOwn(categoryNames,category) || category===currentCategory)return;
@@ -61,6 +64,7 @@ function el(tag, text, cls) {
 }
 function toast(message, error = false) {
   clearTimeout(toastTimer);
+  const editorError=$('#event-editor-error');if(editorError){editorError.hidden=!error;editorError.textContent=error?message:'';}
   const node = $('#toast'); node.textContent = message;
   node.classList.toggle('error', error); node.hidden = false;
   toastTimer = setTimeout(() => { node.hidden = true; }, error ? 10000 : 4500);
@@ -88,6 +92,7 @@ function clearMedia() { for (const audio of Array.from(mediaUrls.keys())) releas
 function showLogin() {
   csrf = ''; state = null; currentUser = null; stateTicket++; previewTicket++; uploadTicket++;
   rememberToken(''); clearMedia();
+  if (eventDialog.open) eventDialog.close(); eventDraft=null;
   $('#app').hidden = true; $('#login-screen').hidden = false;
   $('#password').value = ''; if ($('#username')) $('#username').value = '';
   selectedTeam=''; selectedGuild=''; selectedBot='primary'; currentCategory='entrance';
@@ -141,7 +146,7 @@ async function checkConnection() {
   node.textContent = '연결 확인 중…'; node.className = ''; help.hidden = true;
   try {
     const r = await api('/api/connection');
-    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('dual-bot') || !r.capabilities?.includes('event-play-modes') || !r.capabilities?.includes('separate-voice-channels')) throw new Error('Railway 봇 서버가 최신 청백전 + 경기상황 버전이 아닙니다. 이번 봇 패치를 GitHub에 반영하고 Railway를 재배포하세요.');
+    if (r.service !== 'appearance-song-bot' || r.apiVersion !== 2 || !r.capabilities?.includes('roles-v3') || !r.capabilities?.includes('event-all-categories') || !r.capabilities?.includes('dual-bot') || !r.capabilities?.includes('event-play-modes') || !r.capabilities?.includes('separate-voice-channels')) throw new Error('Railway 봇 서버가 최신 권한·스테이지·경기 사운드 버전이 아닙니다. 이번 봇 패치를 GitHub에 반영하고 Railway를 재배포하세요.');
     const bots = Array.isArray(r.bots) ? r.bots : [];
     const status = bots.map(b=>`${b.name || (b.id==='secondary'?'백팀 봇':'청팀 봇')} ${b.ready?'온라인':'오프라인'}`).join(' · ');
     node.textContent = '웹 연결 정상' + (status ? ' · ' + status : '');
@@ -211,6 +216,7 @@ function context() {
   return {botTarget:selectedBot, guildId:selectedGuild, team:selectedTeam, channelId:$('#voice-select').value || null};
 }
 async function control(action, extra = {}, message = '') {
+  if(!canPlay()) throw new Error('등장곡 재생자 이상 권한이 필요합니다.');
   if (!selectedGuild) throw new Error('Discord 서버를 먼저 선택하세요. 연결된 서버가 없으면 진단 탭을 확인하세요.');
   const result = await api('/api/control', 'POST', {...context(), action, ...extra});
   if (message) toast(message);
@@ -305,12 +311,13 @@ function drawLive(s) {
   $('#sidebar-status').textContent = s.ready ? `${s.botLabel || '선택한 봇'} 연결됨` : `${s.botLabel || '선택한 봇'} 미연결`;
   if ($('#voice-bot-label')) $('#voice-bot-label').textContent = s.botLabel || (selectedBot==='secondary'?'백팀 봇':'청팀 봇');
   const voiceTitle = $('#voice-title'); if (voiceTitle) voiceTitle.textContent = voice?.connected ? `${voice.channelName} 연결됨` : '통화방 연결';
-  $('#voice-detail').textContent = voice?.connected ? (voice.serverMuted ? '서버 음소거를 해제해주세요.' : `음성 연결 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
+  $('#voice-detail').textContent = voice?.connected ? (voice.stageAudience ? '스테이지 청중 상태 · 관리자가 발언자로 전환한 후 다시 재생하세요.' : voice.serverMuted ? '서버 음소거를 해제해주세요.' : `${voice.stage?'스테이지 발언자':'음성 연결'} 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
   $('#voice-error').hidden = !voice?.error; $('#voice-error').textContent = voice?.error || '';
   $('#playing-title').textContent = s.nowPlaying?.title || '재생 대기 중';
   $('#playing-status').textContent = s.nowPlaying?.error || statusNames[s.nowPlaying?.status] || 'Discord 통화방에서 재생됩니다';
   if (document.activeElement !== $('#volume')) { $('#volume').value = Math.round(s.state.volume * 100); $('#volume-value').textContent = $('#volume').value + '%'; }
-  const off = !s.ready;
+  drawAutoEntrance(s.autoEntrance);
+  const off = !s.ready || !canPlay();
   for (const id of ['connect','disconnect','next-player','stop','activate-team']) $('#' + id).disabled = off;
   $('#volume').disabled = off;
 }
@@ -343,7 +350,7 @@ async function loadState(full = true) {
   fillSelect($('#guild-select'), s.guilds, selectedGuild, s.guilds.length ? null : '연결된 서버 없음');
   fillSelect($('#team-select'), s.teams.map(t=>({id:t,name:t})), selectedTeam);
   const chosenVoice = $('#voice-select').value;
-  fillSelect($('#voice-select'), s.channels.map(c=>({id:c.id,name:`${c.name} · ${c.members}명${c.occupiedByOtherBot ? ` (${c.occupiedByLabel || '다른 봇'} 사용 중 · 선택 불가)` : (c.available ? '' : ' (권한 부족)')}`})), chosenVoice || s.voice?.channelId || '', '통화방 선택');
+  fillSelect($('#voice-select'), s.channels.map(c=>({id:c.id,name:`${c.type==='stage'?'스테이지 · ':''}${c.name} · ${c.members}명${c.occupiedByOtherBot ? ` (${c.occupiedByLabel || '다른 봇'} 사용 중 · 선택 불가)` : (c.available ? '' : ' (권한 부족)')}`})), chosenVoice || s.voice?.channelId || '', '통화방 선택');
   const durableRailway = s.storage === 'local' && s.fileStorage?.persistent === true;
   $('#storage-badge').textContent = s.storage === 'firebase' ? '곡 정보: Firebase' : (durableRailway ? '곡 정보: Railway SQLite' : '곡 정보: 로컬 DB');
   const notes = [];
@@ -380,9 +387,9 @@ function renderSongs() {
     if (song.fileMissing) meta.append(el('span','파일 없음','error-text'));
     content.append(meta);
     const actions = el('div',null,'song-actions');
-    actions.append(bindButton('▶ 재생','soft',()=>control('play',{name:song.name,category},categoryNames[category]+' 재생 요청을 처리했습니다.')));
-    actions.append(bindButton('통화방 5초','ghost',()=>control('play',{name:song.name,category,preview:true})));
-    if (['admin','player'].includes(currentUser?.role)) actions.append(bindButton('수정','ghost',()=>editSong(song)));
+    if(canPlay()) actions.append(bindButton('▶ 재생','soft',()=>control('play',{name:song.name,category},categoryNames[category]+' 재생 요청을 처리했습니다.')));
+    if(canPlay()) actions.append(bindButton('통화방 5초','ghost',()=>control('play',{name:song.name,category,preview:true})));
+    if (canEditMusic()) actions.append(bindButton('수정','ghost',()=>editSong(song)));
     if (song.source === 'upload' && !song.fileMissing) {
       actions.append(bindButton('원본 다운로드','ghost',()=>downloadFile('/api/media/'+encodeURIComponent(song.assetId)+'?download=1',song.filename || 'audio')));
       actions.append(bindButton('내 기기에서 듣기','ghost',async()=>{
@@ -403,7 +410,7 @@ function renderSongs() {
         u.protocol='https:'; u.searchParams.set('t',Math.floor(timeValue(song.start))); window.open(u.href,'_blank','noopener,noreferrer');
       }));
     }
-    if (currentUser?.role === 'admin') actions.append(bindButton('삭제','ghost delete',async()=>{
+    if (canEditMusic()) actions.append(bindButton('삭제','ghost delete',async()=>{
       if (!confirm(`“${song.name}” ${categoryNames[category]}를 삭제할까요? 연결된 타순/경기 사운드 설정만 해제됩니다. 다른 종류의 곡과 업로드 원본은 보관됩니다.`)) return;
       await api('/api/songs?'+new URLSearchParams({team:selectedTeam,name:song.name,category}),'DELETE');
       if ($('#song-name').value === song.name) resetEditor();
@@ -421,100 +428,227 @@ function renderLineup() {
     const names=state.songs.map(s=>s.name), current=state.lineup[i] || '';
     if (current && !names.includes(current)) names.push(current);
     fillSelect(select,names.map(n=>({id:n,name:n})),current,'타자 선택'); card.append(select);
-    card.append(bindButton('▷ 등장곡 재생','ghost',()=>control('order',{order:i})));
+    if(canPlay()) card.append(bindButton('▷ 등장곡 재생','ghost',()=>control('order',{order:i})));
     grid.append(card);
   }
 }
+let autoToggleBusy=false;
+function drawAutoEntrance(setting) {
+  const button=$('#auto-entrance-toggle'); if(!button)return;
+  const enabled=setting?.enabled !== false;
+  button.setAttribute('aria-checked',String(enabled));
+  button.classList.toggle('is-on',enabled);
+  button.disabled=autoToggleBusy || !canPlay() || !state;
+  $('#auto-entrance-label').textContent=autoToggleBusy?'저장 중…':enabled?'ON':'OFF';
+}
+$('#auto-entrance-toggle').addEventListener('click',()=>run(null,async()=>{
+  if(autoToggleBusy || !canPlay() || !state)return;
+  const enabled=state.autoEntrance?.enabled===false;
+  autoToggleBusy=true;drawAutoEntrance(state.autoEntrance);
+  try{
+    const r=await api('/api/playback-settings','PUT',{enabled});
+    if(state)state.autoEntrance=r.autoEntrance;
+    toast(`전체 자동 등장곡 ${enabled?'ON':'OFF'} · 수동 재생은 유지됩니다.`);
+  }finally{autoToggleBusy=false;drawAutoEntrance(state?.autoEntrance);}
+}));
+
 function eventTracks(event) {
-  const tracks=event.custom?.tracks;
-  if(Array.isArray(tracks)) return tracks;
-  if(event.custom?.songName) return [{type:'song',songName:event.custom.songName}];
-  if(event.custom?.assetId) return [{type:'asset',assetId:event.custom.assetId,filename:event.custom.filename || '업로드 오디오'}];
+  if(Array.isArray(event.custom?.tracks))return event.custom.tracks.map(t=>({...t, ...(t.type==='song'?{category:t.category || 'situation'}:{})}));
+  if(event.custom?.songName)return [{type:'song',category:event.custom.category || 'situation',songName:event.custom.songName}];
+  if(event.custom?.assetId)return [{type:'asset',assetId:event.custom.assetId,filename:event.custom.filename || '업로드 오디오'}];
   return [];
 }
-function eventModeName(mode){return {single:'단곡',random:'랜덤',sequence:'여러곡 순차'}[mode] || '단곡';}
-async function saveEventTracks(event, tracks, playMode) {
-  await api('/api/events','PUT',{team:selectedTeam,key:event.key,tracks,playMode});
-  await loadState();
-}
+function eventModeName(mode){return {single:'단곡',random:'랜덤',sequence:'순서대로 1곡씩'}[mode] || '단곡';}
+function eventTrackKey(t){return t.type==='song'?JSON.stringify([t.category || 'situation',t.songName]):'asset:'+t.assetId;}
+function eventTrackLabel(t){return t.type==='song'?`[${categoryNames[t.category || 'situation']}] ${t.songName}`:(t.filename || '업로드 오디오');}
 function renderEvents() {
-  const grid=$('#events-grid'); grid.replaceChildren();
-  for (const event of state.events) {
-    const card=el('article',null,'card event-card');
-    const titleRow=el('div',null,'section-head event-title-row');
-    const titleWrap=el('div');
-    titleWrap.append(el('h3',event.label));
-    if(event.customEvent) titleWrap.append(el('span','직접 추가','badge'));
-    titleRow.append(titleWrap);
-    if(currentUser?.role==='admin' && event.customEvent){
-      const actions=el('div',null,'event-mini-actions');
-      actions.append(bindButton('이름 수정','ghost',async()=>{
-        const next=prompt('새 상황 이름을 입력하세요.',event.label); if(next===null)return;
-        const label=next.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
-        await api('/api/events','PUT',{team:selectedTeam,key:event.key,label}); await loadState();toast('경기 상황 이름을 수정했습니다.');
-      }));
+  const grid=$('#events-grid');grid.replaceChildren();if(!state)return;
+  const search=$('#event-search').value.trim().toLocaleLowerCase();
+  const events=(state.events || []).filter(e=>e.label.toLocaleLowerCase().includes(search));
+  $('#event-count').textContent=`${events.length}개 상황`;
+  const deleted=state.deletedEvents || [];
+  $('#deleted-events-box').hidden=!canEditMusic() || !deleted.length;
+  fillSelect($('#deleted-event-select'),deleted.map(e=>({id:e.key,name:e.label})),$('#deleted-event-select').value,'복원할 상황 선택');
+  for(const event of events){
+    const card=el('article',null,'card event-card');card.dataset.eventKey=event.key;
+    const heading=el('div',null,'event-card-heading');
+    heading.append(el('h3',event.label),el('span',event.customEvent?'직접 추가':'기본 상황','badge'));
+    card.append(heading);
+    const tracks=eventTracks(event),mode=event.custom?.playMode || 'single';
+    card.append(el('p',tracks.length?`${eventModeName(mode)} · ${tracks.length}곡 연결됨`:event.customEvent?'연결된 곡 없음':`기본 효과음 ${event.bundledCount}개 · 무작위 재생`,'tiny event-summary'));
+    if(tracks.length){const preview=el('p',tracks.slice(0,3).map(eventTrackLabel).join(' · ')+(tracks.length>3?` 외 ${tracks.length-3}곡`:''),'event-track-preview');card.append(preview);}
+    const actions=el('div',null,'event-card-actions');
+    if(canPlay())actions.append(bindButton('▶ 상황 재생','soft',()=>control('event',{key:event.key})));
+    if(canEditMusic()){
+      actions.append(bindButton('곡 · 순서 편집','ghost',()=>openEventEditor(event)));
       actions.append(bindButton('상황 삭제','ghost delete',async()=>{
-        if(!confirm(`“${event.label}” 상황을 삭제할까요? 연결된 사운드 목록도 함께 삭제됩니다.`))return;
-        await api(`/api/events?team=${encodeURIComponent(selectedTeam)}&key=${encodeURIComponent(event.key)}`,'DELETE'); await loadState();toast('경기 상황을 삭제했습니다.');
+        const team=selectedTeam;
+        if(!confirm(`“${event.label}” 상황을 삭제할까요? 이 팀의 목록에서 사라지고 재생할 수 없게 됩니다. 원본 곡은 보관되며 나중에 복원할 수 있습니다.`))return;
+        await api('/api/events?'+new URLSearchParams({team,key:event.key}),'DELETE');await loadState();toast('상황을 삭제했습니다. 아래 복원 메뉴에서 되돌릴 수 있습니다.');
       }));
-      titleRow.append(actions);
     }
-    card.append(titleRow);
-
-    const tracks=eventTracks(event), mode=event.custom?.playMode || 'single';
-    const summary=tracks.length ? `${eventModeName(mode)} · ${tracks.length}곡 연결됨` : (event.customEvent ? '아직 연결된 사운드가 없습니다.' : `기본 효과음 ${event.bundledCount}개 · 무작위 재생`);
-    card.append(el('p',summary,'tiny event-summary'));
-    card.append(bindButton('▶ 상황 재생','soft',()=>control('event',{key:event.key})));
-
-    if (currentUser?.role !== 'admin') { grid.append(card); continue; }
-
-    const settings=el('div',null,'event-settings');
-    const modeLabel=el('label','재생 방식'), modeSelect=el('select');
-    [['single','단곡'],['random','랜덤'],['sequence','여러곡 순차']].forEach(([id,name])=>{const o=el('option',name);o.value=id;if(id===mode)o.selected=true;modeSelect.append(o);});
-    modeSelect.addEventListener('change',()=>run(modeSelect,async()=>{
-      await saveEventTracks(event,tracks,modeSelect.value); toast(`재생 방식을 ${eventModeName(modeSelect.value)}(으)로 변경했습니다.`);
-    }));
-    modeLabel.append(modeSelect); settings.append(modeLabel);
-    const help={single:'첫 번째 곡 1개를 항상 재생합니다.',random:'연결한 곡 중 하나를 매번 무작위로 재생합니다.',sequence:'상황 버튼을 누를 때마다 다음 곡을 순서대로 재생합니다.'};
-    settings.append(el('p',help[mode] || help.single,'tiny event-mode-help'));
-
-    const list=el('div',null,'event-track-list');
-    if(!tracks.length){list.append(el('p','연결된 곡이 없습니다. 아래에서 상황별 노래나 파일을 추가하세요.','tiny'));}
-    tracks.forEach((track,index)=>{
-      const row=el('div',null,'event-track-row');
-      row.append(el('span',`${index+1}. ${track.type==='song' ? track.songName : (track.filename || '업로드 오디오')}`));
-      row.append(bindButton('빼기','ghost delete',()=>run(null,async()=>{
-        const next=tracks.filter((_,i)=>i!==index); await saveEventTracks(event,next,mode); toast('목록에서 제거했습니다.');
-      })));
-      list.append(row);
-    });
-    settings.append(list);
-
-    const songLabel=el('label','상황별 노래 추가'), chooser=el('select');
-    chooser.setAttribute('aria-label',event.label+'에 추가할 상황별 노래');
-    fillSelect(chooser,categorySongs('situation').map(s=>({id:s.name,name:s.name})),null,'곡을 선택하세요');
-    songLabel.append(chooser); settings.append(songLabel);
-    settings.append(bindButton('+ 선택한 노래 추가','ghost',async()=>{
-      if(!chooser.value)throw new Error('상황별 노래를 먼저 선택하세요.');
-      const next=[...tracks,{type:'song',songName:chooser.value}];
-      await saveEventTracks(event,next,mode); toast('경기 상황 곡 목록에 추가했습니다.');
-    }));
-
-    const fileLabel=el('label','오디오 파일 추가'), input=el('input'); input.type='file'; input.disabled=state?.fileStorage?.uploadsAllowed===false; input.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';
-    input.addEventListener('change',()=>run(null,async()=>{
-      const file=input.files[0]; if(!file)return; input.disabled=true;
-      try { toast('경기 사운드를 업로드하고 있습니다.'); const result=await uploadFile(file); const next=[...tracks,{type:'asset',assetId:result.id,filename:result.name || file.name}]; await saveEventTracks(event,next,mode); toast('오디오를 경기 상황 목록에 추가했습니다.'); }
-      finally {input.disabled=state?.fileStorage?.uploadsAllowed===false;}
-    }));
-    fileLabel.append(input); settings.append(fileLabel);
-
-    if(tracks.length) settings.append(bindButton(event.customEvent?'목록 모두 비우기':'기본 효과음으로 복원','ghost delete',async()=>{
-      const msg=event.customEvent?'연결한 모든 곡을 목록에서 비울까요?':'등록한 곡 목록을 지우고 기본 효과음으로 돌아갈까요?';
-      if(!confirm(msg))return; await saveEventTracks(event,[],mode); toast(event.customEvent?'곡 목록을 비웠습니다.':'기본 효과음으로 복원했습니다.');
-    }));
-    card.append(settings); grid.append(card);
+    card.append(actions);grid.append(card);
   }
+  if(!events.length)grid.append(el('p',search?'검색 결과가 없습니다.':'경기 상황이 없습니다. 새 상황을 추가하거나 삭제한 상황을 복원하세요.','notice'));
 }
+$('#event-search').addEventListener('input',renderEvents);
+$('#restore-event').addEventListener('click',()=>run($('#restore-event'),async()=>{
+  const key=$('#deleted-event-select').value;if(!key)throw new Error('복원할 상황을 선택하세요.');
+  await api('/api/events','PUT',{team:selectedTeam,key,restore:true});await loadState();toast('경기 상황을 복원했습니다.');
+}));
+
+let eventDraft=null;
+const eventDialog=$('#event-editor-dialog');
+function closeEventEditor(){
+  if(eventDraft?.busy)return;
+  if(eventDraft?.dirty && !confirm('저장하지 않은 변경사항을 닫을까요? 업로드 원본은 서버에 남지만 상황 연결은 저장되지 않습니다.'))return;
+  eventDialog.close();eventDraft=null;
+}
+eventDialog.addEventListener('cancel',e=>{e.preventDefault();closeEventEditor();});
+function openEventEditor(event){
+  if(!canEditMusic())return;
+  const library=Object.entries(categoryNames).flatMap(([category])=>categorySongs(category).map(s=>({type:'song',category,songName:s.name})));
+  eventDraft={team:selectedTeam,key:event.key,label:event.label,customEvent:!!event.customEvent,tracks:eventTracks(event),
+    playMode:event.custom?.playMode || 'single',library,selected:new Set(),dirty:false,busy:false,
+    max:state.maxEventTracks || 100,uploadsAllowed:state.fileStorage?.uploadsAllowed!==false};
+  const box=$('#event-editor-content');box.replaceChildren();
+  const header=el('div',null,'event-editor-header'),titles=el('div');
+  titles.append(el('p','SOUNDBOARD EDITOR','eyebrow accent'));
+  const title=el('h2',`${event.label} · 사운드 편집`);title.id='event-editor-title';titles.append(title,el('p','체크해서 한 번에 추가하고, 드래그 또는 화살표로 순서를 바꿔보세요.','tiny'));
+  header.append(titles,bindButton('닫기','ghost',closeEventEditor));box.append(header);
+  const editorError=el('p',null,'notice danger');editorError.id='event-editor-error';editorError.setAttribute('role','alert');editorError.hidden=true;box.append(editorError);
+  const metadata=el('div',null,'event-editor-meta');
+  if(event.customEvent){const label=el('label','상황 이름'),input=el('input');input.id='event-edit-name';input.maxLength=64;input.value=event.label;input.addEventListener('input',()=>{eventDraft.label=input.value;eventDraft.dirty=true;});label.append(input);metadata.append(label);}
+  const modeLabel=el('label','재생 방식'),mode=el('select');mode.id='event-edit-mode';
+  fillSelect(mode,['single','random','sequence'].map(id=>({id,name:eventModeName(id)})),eventDraft.playMode);
+  mode.addEventListener('change',()=>{eventDraft.playMode=mode.value;eventDraft.dirty=true;updateEventDraftCount();});modeLabel.append(mode);metadata.append(modeLabel);box.append(metadata);
+  const help=el('p',null,'notice');help.id='event-mode-help';box.append(help);
+  const panes=el('div',null,'event-editor-panes');
+  const left=el('section',null,'event-picker-pane');left.append(el('h3','01 · 라이브러리에서 여러 곡 선택'));
+  const filters=el('div',null,'event-picker-filters');
+  const category=el('select');category.id='event-library-category';category.setAttribute('aria-label','곡 종류 필터');
+  fillSelect(category,[{id:'all',name:'모든 종류'},...Object.entries(categoryNames).map(([id,name])=>({id,name}))],'all');
+  const search=el('input');search.type='search';search.id='event-library-search';search.placeholder='곡 이름 검색';search.setAttribute('aria-label','추가할 곡 검색');
+  category.addEventListener('change',renderEventChoices);search.addEventListener('input',renderEventChoices);filters.append(category,search);left.append(filters);
+  const selectActions=el('div',null,'event-selection-actions');
+  selectActions.append(bindButton('검색 결과 전체 선택','ghost',()=>{for(const t of filteredEventChoices())if(!eventDraft.tracks.some(x=>eventTrackKey(x)===eventTrackKey(t)))eventDraft.selected.add(eventTrackKey(t));renderEventChoices();}));
+  selectActions.append(bindButton('선택 해제','ghost',()=>{eventDraft.selected.clear();renderEventChoices();}));left.append(selectActions);
+  const choices=el('div',null,'event-library-choices');choices.id='event-library-choices';left.append(choices);
+  const add=bindButton('선택한 곡 한 번에 추가','primary wide',()=>{
+    const selected=eventDraft.library.filter(t=>eventDraft.selected.has(eventTrackKey(t)));
+    if(!selected.length)throw new Error('추가할 곡을 체크하세요.');
+    addEventDraftTracks(selected);eventDraft.selected.clear();renderEventChoices();
+  });add.id='add-selected-event-tracks';left.append(add);panes.append(left);
+  const right=el('section',null,'event-queue-pane'),queueHead=el('div',null,'section-head');
+  queueHead.append(el('h3','02 · 연결 순서'));
+  const count=el('span',null,'badge');count.id='event-draft-count';queueHead.append(count);right.append(queueHead);
+  const queue=el('div',null,'event-draft-list');queue.id='event-draft-list';right.append(queue);
+  const clear=bindButton(event.customEvent?'연결 목록 비우기':'목록 비우고 기본 효과음 사용','ghost delete',()=>{
+    if(!confirm('연결한 곡 목록을 비울까요? 원본 곡은 삭제하지 않습니다.'))return;
+    eventDraft.tracks=[];eventDraft.dirty=true;renderEventDraftList();renderEventChoices();
+  });right.append(clear);
+  const drop=el('div',null,'event-file-drop');drop.id='event-file-drop';
+  const fileLabel=el('label','여러 오디오 파일을 여기에 놓거나 선택하세요'),file=el('input');
+  file.type='file';file.multiple=true;file.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';file.id='event-files';file.disabled=!eventDraft.uploadsAllowed;
+  file.addEventListener('change',()=>{const files=Array.from(file.files);file.value='';run(null,()=>uploadEventFiles(files));});
+  fileLabel.append(file);drop.append(fileLabel,el('p','여러 파일을 한 번에 업로드한 뒤 아래 ‘변경사항 저장’을 눌러주세요.','tiny'));
+  for(const type of ['dragenter','dragover'])drop.addEventListener(type,e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files'))drop.classList.add('dragging');});
+  for(const type of ['dragleave','drop'])drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('dragging');});
+  drop.addEventListener('drop',e=>{if(e.dataTransfer.files.length)run(null,()=>uploadEventFiles(Array.from(e.dataTransfer.files)));});
+  const progress=el('progress');progress.id='event-upload-progress';progress.max=100;progress.hidden=true;drop.append(progress);
+  const status=el('p',eventDraft.uploadsAllowed?'':'서버 영구 저장소가 없어 업로드가 차단되었습니다.','tiny');status.id='event-upload-status';status.setAttribute('role','status');drop.append(status);right.append(drop);panes.append(right);box.append(panes);
+  const footer=el('div',null,'event-editor-footer');footer.append(el('p','추가·빼기·순서 변경은 저장 후 적용됩니다. 순서 재생은 버튼을 누를 때마다 다음 1곡을 재생합니다.','tiny'));
+  const save=bindButton('변경사항 저장','primary',saveEventDraft);save.id='save-event-draft';footer.append(save);box.append(footer);
+  renderEventDraftList();renderEventChoices();eventDialog.showModal();
+}
+function filteredEventChoices(){
+  const category=$('#event-library-category').value,query=$('#event-library-search').value.trim().toLocaleLowerCase();
+  return eventDraft.library.filter(t=>(category==='all' || t.category===category) && t.songName.toLocaleLowerCase().includes(query));
+}
+function renderEventChoices(){
+  if(!eventDraft)return;
+  const box=$('#event-library-choices');box.replaceChildren();
+  const queued=new Set(eventDraft.tracks.map(eventTrackKey)),choices=filteredEventChoices();
+  for(const track of choices){
+    const key=eventTrackKey(track),label=el('label',null,'event-song-choice'),input=el('input');input.type='checkbox';
+    input.checked=queued.has(key) || eventDraft.selected.has(key);input.disabled=queued.has(key) || eventDraft.busy;
+    input.setAttribute('aria-label',eventTrackLabel(track));
+    input.addEventListener('change',()=>{if(input.checked)eventDraft.selected.add(key);else eventDraft.selected.delete(key);$('#add-selected-event-tracks').textContent=`선택한 ${eventDraft.selected.size}곡 한 번에 추가`;});
+    label.append(input,el('span',track.songName),el('small',queued.has(key)?'연결됨':categoryNames[track.category]));box.append(label);
+  }
+  if(!choices.length)box.append(el('p','이 조건에 맞는 곡이 없습니다. 음악 라이브러리에 먼저 등록하거나 오른쪽에서 파일을 업로드하세요.','tiny'));
+  $('#add-selected-event-tracks').textContent=`선택한 ${eventDraft.selected.size}곡 한 번에 추가`;
+}
+function updateEventDraftCount(){
+  $('#event-draft-count').textContent=`${eventDraft.tracks.length} / ${eventDraft.max}곡`;
+  $('#event-mode-help').textContent={single:'단곡: 연결 순서의 첫 번째 곡만 재생합니다.',random:'랜덤: 연결한 곡 중 하나를 매번 무작위로 재생합니다.',sequence:'순서: 상황 재생 버튼을 누를 때마다 다음 1곡으로 넘어갑니다. 끝나면 첫 곡으로 돌아갑니다.'}[eventDraft.playMode];
+}
+function addEventDraftTracks(tracks){
+  const known=new Set(eventDraft.tracks.map(eventTrackKey)),fresh=[];
+  for(const t of tracks)if(!known.has(eventTrackKey(t))){known.add(eventTrackKey(t));fresh.push({...t});}
+  if(eventDraft.tracks.length+fresh.length>eventDraft.max)throw new Error(`한 상황에는 최대 ${eventDraft.max}곡까지 연결할 수 있습니다.`);
+  eventDraft.tracks.push(...fresh);eventDraft.dirty=true;renderEventDraftList();renderEventChoices();
+}
+function moveEventTrack(from,to){
+  if(!eventDraft || eventDraft.busy || from===to || from<0 || to<0 || from>=eventDraft.tracks.length || to>=eventDraft.tracks.length)return;
+  const [item]=eventDraft.tracks.splice(from,1);eventDraft.tracks.splice(to,0,item);eventDraft.dirty=true;renderEventDraftList();
+}
+function renderEventDraftList(){
+  if(!eventDraft)return;const list=$('#event-draft-list');list.replaceChildren();updateEventDraftCount();
+  eventDraft.tracks.forEach((track,index)=>{
+    const row=el('div',null,'event-draft-row');row.draggable=!eventDraft.busy;row.dataset.index=index;
+    const handle=el('span','⠿','drag-handle');handle.setAttribute('aria-hidden','true');
+    row.append(handle,el('span',`${index+1}. ${eventTrackLabel(track)}`,'event-draft-title'));
+    const controls=el('div',null,'event-order-actions');
+    const up=bindButton('↑','ghost',()=>moveEventTrack(index,index-1));up.setAttribute('aria-label',`${eventTrackLabel(track)} 위로`);up.disabled=index===0;
+    const down=bindButton('↓','ghost',()=>moveEventTrack(index,index+1));down.setAttribute('aria-label',`${eventTrackLabel(track)} 아래로`);down.disabled=index===eventDraft.tracks.length-1;
+    controls.append(up,down,bindButton('빼기','ghost delete',()=>{eventDraft.tracks.splice(index,1);eventDraft.dirty=true;renderEventDraftList();renderEventChoices();}));row.append(controls);
+    row.addEventListener('dragstart',e=>{if(eventDraft.busy){e.preventDefault();return;}e.dataTransfer.setData('application/x-appearance-track',String(index));e.dataTransfer.effectAllowed='move';row.classList.add('dragging');});
+    row.addEventListener('dragend',()=>row.classList.remove('dragging'));
+    row.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('application/x-appearance-track')){e.preventDefault();e.dataTransfer.dropEffect='move';}});
+    row.addEventListener('drop',e=>{e.preventDefault();const data=e.dataTransfer.getData('application/x-appearance-track');if(/^\d+$/.test(data))moveEventTrack(Number(data),index);});
+    list.append(row);
+  });
+  if(!eventDraft.tracks.length)list.append(el('p',eventDraft.customEvent?'왼쪽에서 곡을 추가하거나 아래로 파일을 놓으세요.':'비워서 저장하면 이 상황의 기본 효과음으로 돌아갑니다.','tiny'));
+}
+function setEventEditorBusy(busy){
+  if(!eventDraft)return;eventDraft.busy=busy;
+  $$('#event-editor-dialog button, #event-editor-dialog input, #event-editor-dialog select').forEach(n=>n.disabled=busy);
+  if(!busy){$('#event-files').disabled=!eventDraft.uploadsAllowed;renderEventDraftList();renderEventChoices();}
+}
+async function uploadEventFiles(files){
+  const draft=eventDraft;if(!draft || draft.busy || !files.length)return;
+  if(!draft.uploadsAllowed)throw new Error('서버의 영구 저장소를 확인해주세요.');
+  if(draft.tracks.length+files.length>draft.max)throw new Error(`최대 ${draft.max}곡입니다. 현재 ${draft.tracks.length}곡, 선택 ${files.length}개입니다.`);
+  const bad=files.find(f=>! /\.(mp3|wav|ogg|m4a|flac|aac|opus|webm)$/i.test(f.name));
+  if(bad)throw new Error('지원하지 않는 파일: '+bad.name);
+  setEventEditorBusy(true);const status=$('#event-upload-status'),progress=$('#event-upload-progress');progress.hidden=false;
+  let success=0;const errors=[];
+  try{
+    for(let i=0;i<files.length;i++){
+      if(eventDraft!==draft || !csrf)break;
+      const file=files[i];status.textContent=`${i+1}/${files.length} 업로드 · ${file.name}`;
+      try{
+        const result=await uploadFile(file,value=>{progress.value=(i+value/100)/files.length*100;});
+        if(eventDraft!==draft || !csrf)break;
+        draft.tracks.push({type:'asset',assetId:result.id,filename:result.name || file.name});draft.dirty=true;success++;
+      }catch(err){errors.push(`${file.name}: ${err.message}`);}
+      progress.value=(i+1)/files.length*100;
+    }
+    status.textContent=`${success}개 업로드 완료. ‘변경사항 저장’을 눌러 연결하세요.`+(errors.length?` 실패 ${errors.length}개: ${errors.join(' / ')}`:'');
+    toast(errors.length?`${success}개 성공, ${errors.length}개 실패. 업로드 영역에서 상세 내용을 확인하세요.`:`${success}개 파일을 추가했습니다. 저장하면 적용됩니다.`,!!errors.length);
+  }finally{if(eventDraft===draft)setEventEditorBusy(false);}
+}
+async function saveEventDraft(){
+  const draft=eventDraft;if(!draft || draft.busy)return;
+  if(draft.customEvent && !draft.label.trim())throw new Error('상황 이름을 입력하세요.');
+  setEventEditorBusy(true);
+  try{
+    await api('/api/events','PUT',{team:draft.team,key:draft.key,tracks:draft.tracks,playMode:draft.playMode,...(draft.customEvent?{label:draft.label.trim()}:{})});
+    draft.dirty=false;eventDialog.close();eventDraft=null;await loadState();toast('경기 사운드와 재생 순서를 저장했습니다.');
+  }finally{if(eventDraft===draft)setEventEditorBusy(false);}
+}
+
 async function diagnostics() {
   const d=await api('/api/diagnostics');
   const values=$('#diagnostic-values'); values.replaceChildren();
@@ -525,34 +659,42 @@ async function diagnostics() {
 }
 function applyRole() {
   const admin = currentUser?.role === 'admin';
-  $('#signed-user').textContent = currentUser ? `${currentUser.displayName} · ${admin ? '관리자' : '재생자'}` : '';
+  $('#signed-user').textContent = currentUser ? `${currentUser.displayName} · ${roleNames[currentUser.role] || '권한 확인 필요'}` : '';
   $$('.admin-only').forEach(x=>x.hidden=!admin);
-  // 재생자도 등장곡 등록/오디오 업로드/수정 가능. 운영 설정은 관리자만 보인다.
-  const editor = $('.song-editor'); if (editor) editor.hidden = !['admin','player'].includes(currentUser?.role);
-  for (const sel of ['#new-team','#activate-team','#save-lineup','#export-backup','#export-audio-backup']) { const x=$(sel); if(x)x.hidden=!admin; }
+  $$('.music-manager-only').forEach(x=>x.hidden=!canEditMusic());
+  $('#deleted-events-box').hidden=!canEditMusic() || !(state?.deletedEvents?.length);
+  const editor = $('.song-editor'); if(editor)editor.hidden=!canEditMusic();
+  $('.library-grid')?.classList.toggle('read-only',!canEditMusic());
+  for(const sel of ['#new-team','#activate-team','#save-lineup','#export-backup','#export-audio-backup']) {const x=$(sel);if(x)x.hidden=!admin;}
   $$('#lineup-grid select').forEach(x=>x.disabled=!admin);
+  $('#role-notice').hidden=currentUser?.role!=='user';
+  if(state)drawLive(state);
 }
 async function loadUsers() {
-  if (currentUser?.role !== 'admin') return;
-  const r=await api('/api/users'); const list=$('#user-list'); list.replaceChildren();
+  if(currentUser?.role!=='admin')return;
+  const r=await api('/api/users'), list=$('#user-list');list.replaceChildren();
   for(const u of r.users){
     const row=el('article',null,'user-row'), info=el('div');
-    info.append(el('strong',u.displayName || u.username),el('p',`@${u.username} · ${u.role==='admin'?'관리자':u.role==='player'?'재생자':'승인 대기'}${u.enabled===false?' · 사용 중지':''}`,'tiny')); row.append(info);
+    info.append(el('strong',u.displayName || u.username),el('p',`@${u.username} · ${roleNames[u.role] || '알 수 없는 권한'}${u.enabled===false?' · 사용 중지':''}`,'tiny'));row.append(info);
     const actions=el('div',null,'user-actions');
     if(u.username==='admin'){actions.append(el('span','기본 관리자','badge'));}
-    else {
-      if(u.role!=='player') actions.append(bindButton('재생자로 승인','primary',async()=>{await api('/api/users/'+encodeURIComponent(u.username),'PUT',{role:'player',enabled:true});await loadUsers();toast('재생자로 승인했습니다.');}));
-      else actions.append(bindButton('승인 대기로 변경','ghost',async()=>{await api('/api/users/'+encodeURIComponent(u.username),'PUT',{role:'pending',enabled:true});await loadUsers();}));
+    else{
+      const select=el('select');select.setAttribute('aria-label',`${u.username} 권한`);
+      fillSelect(select,['pending','user','player','registrar'].map(k=>({id:k,name:roleNames[k]})),u.role);
+      actions.append(select,bindButton('권한 저장','primary',async()=>{
+        await api('/api/users/'+encodeURIComponent(u.username),'PUT',{role:select.value,enabled:u.enabled!==false});
+        await loadUsers();toast('권한을 저장했습니다. 해당 사용자는 다시 로그인해야 합니다.');
+      }));
       actions.append(bindButton(u.enabled===false?'사용 재개':'사용 중지','ghost',async()=>{await api('/api/users/'+encodeURIComponent(u.username),'PUT',{role:u.role,enabled:u.enabled===false});await loadUsers();}));
-      actions.append(bindButton('삭제','ghost delete',async()=>{if(!confirm(`${u.displayName||u.username} 계정을 삭제할까요?`))return;await api('/api/users/'+encodeURIComponent(u.username),'DELETE');await loadUsers();toast('계정을 삭제했습니다.');}));
+      actions.append(bindButton('계정 삭제','ghost delete',async()=>{if(!confirm(`${u.displayName||u.username} 계정을 삭제할까요?`))return;await api('/api/users/'+encodeURIComponent(u.username),'DELETE');await loadUsers();toast('계정을 삭제했습니다.');}));
     }
-    row.append(actions); list.append(row);
+    row.append(actions);list.append(row);
   }
 }
 function setTab(name) {
   $$('.nav').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
   $$('.tab-panel').forEach(p=>{p.hidden=p.id!=='tab-'+name;});
-  $('#page-title').textContent = {songs:'음악 라이브러리',lineup:'타순 관리',events:'경기 사운드',diagnostics:'연결 진단',users:'재생자 관리'}[name];
+  $('#page-title').textContent = {songs:'음악 라이브러리',lineup:'타순 관리',events:'경기 사운드',diagnostics:'연결 진단',users:'회원 · 권한 관리'}[name];
   if(name==='diagnostics')run(null,diagnostics); if(name==='users')run(null,loadUsers);
 }
 $('#login-form').addEventListener('submit',async e=>{
@@ -603,16 +745,17 @@ $('#volume').addEventListener('input',()=>{$('#volume-value').textContent=$('#vo
 $('#volume').addEventListener('change',()=>run(null,()=>control('volume',{value:Number($('#volume').value)})));
 $('#save-lineup').addEventListener('click',()=>run($('#save-lineup'),async()=>{const lineup={};$$('#lineup-grid select').forEach(s=>{lineup[s.dataset.order]=s.value;});await api('/api/lineup','PUT',{team:selectedTeam,lineup});await loadState();toast('타순을 저장했습니다.');}));
 $('#event-create-form').addEventListener('submit',e=>{e.preventDefault();run(e.submitter,async()=>{
-  if(currentUser?.role!=='admin')throw new Error('관리자만 경기 상황을 추가할 수 있습니다.');
+  if(!canEditMusic())throw new Error('등록/삭제자 이상 권한이 필요합니다.');
   if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
   const label=$('#event-name').value.trim();if(!label)throw new Error('상황 이름을 입력하세요.');
   const playMode=$('#event-create-mode').value;
-  await api('/api/events','POST',{team:selectedTeam,label,playMode});
+  const created=await api('/api/events','POST',{team:selectedTeam,label,playMode});
   $('#event-name').value='';await loadState();toast('새 경기 상황을 추가했습니다.');
+  const event=state.events.find(e=>e.key===created.key);if(event)openEventEditor(event);
 });});
 $('#check-connection').addEventListener('click',()=>run($('#check-connection'),checkConnection));
 $('#export-backup').addEventListener('click',()=>run($('#export-backup'),exportBackup));
-$('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-backup'),async()=>{toast('음악 백업을 준비합니다. 파일이 많으면 시간이 걸릴 수 있어요.');await downloadFile('/api/backup','appearance-music-backup.zip');toast('백업 다운로드를 시작했습니다.');}));
+$('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-backup'),async()=>{toast('음악 백업을 준비합니다. 파일이 많으면 시간이 걸릴 수 있어요.');await downloadFile('/api/backup','APPEARANCE-음악백업-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.zip');toast('백업 다운로드를 시작했습니다.');}));
 window.addEventListener('pagehide',clearMedia);
 $('#reload-users').addEventListener('click',()=>run($('#reload-users'),loadUsers));
 $('#reload-diagnostics').addEventListener('click',()=>run($('#reload-diagnostics'),diagnostics));
@@ -624,3 +767,5 @@ configureClient();
   try{const r=await api('/api/session');csrf=r.csrf;currentUser=r.user;restoreWorkspace();$('#login-screen').hidden=true;$('#app').hidden=false;applyRole();await loadState();applyRole();}
   catch(err){if(csrf)toast(err.message,true);else showLogin();}
 })();
+
+window.addEventListener('beforeunload',event=>{if(eventDraft?.dirty || eventDraft?.busy){event.preventDefault();event.returnValue='';}});
