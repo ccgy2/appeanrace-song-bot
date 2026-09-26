@@ -24,7 +24,7 @@ async def main():
            'fileStorage':{'status':'local','persistent':None,'uploadsAllowed':True,'label':'테스트 데이터 · 실제 서버에 미연결','message':'이 화면은 동작 확인용 예시이며 실제 등록 곡과 무관합니다.'},
            'library':{c:[{'name':'같은 이름','category':c,'source':'youtube','url':'https://youtu.be/abcdefghijk','start':0,'end':20,'memberId':''},
                          {'name':f'{c} 아주 긴 곡 이름과 한글 테스트를 위한 노래','category':c,'source':'youtube','url':'https://youtu.be/abcdefghijk','start':0,'end':20,'memberId':''}] for c in ['entrance','cheer','situation']},
-           'events':events,'deletedEvents':[]}
+           'events':events,'deletedEvents':[],'songVolumeEnabled':True}
     state['songs']=state['library']['entrance']
     checks=[];errors=[]
     async with async_playwright() as pw:
@@ -37,7 +37,7 @@ async def main():
           window.fetch=async function(url,opts={}){
             const path=new URL(url).pathname,q=new URL(url).searchParams,method=opts.method||'GET',d=opts.body?JSON.parse(opts.body):{};let reply={ok:true};
             window.savedRequests.push({path,method,data:d});
-            if(path==='/api/connection')reply={service:'appearance-song-bot',apiVersion:2,capabilities:['roles-v3','event-all-categories','dual-bot','event-play-modes','separate-voice-channels'],discordReady:true};
+            if(path==='/api/connection')reply={service:'appearance-song-bot',apiVersion:2,capabilities:['song-volume','roles-v3','event-all-categories','dual-bot','event-play-modes','separate-voice-channels'],discordReady:true};
             if(path==='/api/login')reply={ok:true,accessToken:'test-only',csrf:'test-csrf',user:{username:'demo',displayName:'테스트 계정',role:window.fixtureRole}};
             if(path==='/api/state'||path==='/api/live')reply=window.fixture;
             if(path==='/api/playback-settings' && method==='PUT'){window.fixture.autoEntrance={enabled:d.enabled,revision:window.fixture.autoEntrance.revision+1};reply={autoEntrance:window.fixture.autoEntrance};}
