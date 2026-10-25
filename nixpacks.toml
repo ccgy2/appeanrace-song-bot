@@ -1,6 +1,7 @@
 # Dockerfile is preferred. This is a fallback for existing Nixpacks deployments.
 [variables]
 NIXPACKS_PYTHON_VERSION = "3.12"
+AUDIO_PROFILE = "economy"
 
 [phases.setup]
 nixPkgs = ["...", "ffmpeg", "libopus", "deno"]

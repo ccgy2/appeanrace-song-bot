@@ -96,6 +96,11 @@ class Settings:
     secondary_bot_label: str = '백팀 봇'
     on_railway: bool = False
     volume_path: Path | None = None
+    youtube_cache_seconds: int = 600
+    youtube_cache_entries: int = 32
+    youtube_max_concurrent: int = 1
+    ffmpeg_threads: int = 1
+    audio_profile: str = 'standard'
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -166,9 +171,16 @@ class Settings:
             enable_members_intent=flag('ENABLE_MEMBERS_INTENT'),
             primary_bot_label=os.getenv('PRIMARY_BOT_LABEL', '청팀 봇').strip() or '청팀 봇',
             secondary_bot_label=os.getenv('SECONDARY_BOT_LABEL', '백팀 봇').strip() or '백팀 봇',
+            youtube_cache_seconds=max(0, min(1800, int(os.getenv('YTDLP_CACHE_SECONDS', '600')))),
+            youtube_cache_entries=max(0, min(128, int(os.getenv('YTDLP_CACHE_ENTRIES', '32')))),
+            youtube_max_concurrent=max(1, min(2, int(os.getenv('YTDLP_MAX_CONCURRENT', '1')))),
+            ffmpeg_threads=max(1, min(4, int(os.getenv('FFMPEG_THREADS', '1')))),
+            audio_profile=os.getenv('AUDIO_PROFILE', 'standard').strip().lower() or 'standard',
         )
         if not 1 <= s.port <= 65535:
             raise ValueError('PORT는 1~65535여야 합니다.')
+        if s.audio_profile not in {'standard', 'economy'}:
+            raise ValueError('AUDIO_PROFILE은 standard 또는 economy만 사용할 수 있습니다.')
         if s.web_password and (len(s.web_password) < 12 or s.web_password.startswith('CHANGE_ME')):
             raise ValueError('WEB_ADMIN_PASSWORD를 12자 이상의 새 비밀번호로 바꾸세요.')
         if not s.web_only and not s.token:

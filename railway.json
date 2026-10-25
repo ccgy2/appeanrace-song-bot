@@ -5,6 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
+    "numReplicas": 1,
+    "overlapSeconds": 0,
     "startCommand": "python main.py",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 120,

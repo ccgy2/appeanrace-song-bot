@@ -9,6 +9,7 @@ import json
 import logging
 import sqlite3
 import threading
+import weakref
 from pathlib import Path
 from typing import Any
 from config import Settings
@@ -20,11 +21,29 @@ PLAYBACK_CACHE: dict[str, dict] = {}
 PLAYBACK_LOCK = threading.RLock()
 
 
+class _SharedRevision:
+    """One tiny revision counter for stores that share the same database."""
+    def __init__(self):
+        self.value = 0
+        self.lock = threading.RLock()
+
+
+STORE_REVISIONS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
 class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.lock = LOCAL_SQLITE_LOCK if not settings.firebase_key else threading.RLock()
         self.playback_cache_key = ('firebase' if settings.firebase_key else str(settings.data_dir.resolve()))
+        # Both Discord clients have their own Store, but share data. A write from
+        # either client must invalidate the web snapshot without a polling read.
+        with LOCAL_SQLITE_LOCK:
+            shared = STORE_REVISIONS.get(self.playback_cache_key)
+            if shared is None:
+                shared = _SharedRevision()
+                STORE_REVISIONS[self.playback_cache_key] = shared
+            self._shared_revision = shared
+        self.lock = shared.lock
         self.db = None
         self.sql = None
         if settings.firebase_key:
@@ -55,6 +74,11 @@ class Store:
             self.mode = 'local'
             log.info('데이터 저장소: Railway Volume의 SQLite 사용 (%s)', settings.data_dir / 'songs.sqlite3')
 
+    @property
+    def revision(self) -> int:
+        """In-process committed-write revision; reading it never accesses the DB."""
+        return self._shared_revision.value
+
     def _read(self, path: str) -> dict | None:
         if self.db is not None:
             d = self.db.document(path).get(timeout=12)
@@ -77,16 +101,24 @@ class Store:
             self.db.document(path).set(body, merge=merge, timeout=12)
         else:
             if merge:
-                body = {**(self._read(path) or {}), **body}
+                existing = self._read(path)
+                body = {**(existing or {}), **body}
+                # Every song/event save calls create_team. Once the parent team
+                # exists, avoid a redundant disk commit and cache invalidation.
+                if existing == body:
+                    return
             self.sql.execute('INSERT OR REPLACE INTO docs VALUES (?,?)', (path, json.dumps(body, ensure_ascii=False)))
             self.sql.commit()
+        self._shared_revision.value += 1
 
     def _list(self, collection: str) -> list[dict]:
         if self.db is not None:
             return [{'id': d.id, **(d.to_dict() or {})} for d in self.db.collection(collection).stream(timeout=12)]
         prefix = collection + '/'
-        # LIKE는 팀 이름의 %/_ 문자와 충돌하므로 사용하지 않는다.
-        rows = self.sql.execute('SELECT path,body FROM docs WHERE substr(path,1,?)=?', (len(prefix), prefix)).fetchall()
+        # Exact indexed range: '/' is immediately before '0' in SQLite's BINARY
+        # ordering. Unlike LIKE this also treats team names with %/_ literally.
+        rows = self.sql.execute('SELECT path,body FROM docs WHERE path>=? AND path<?',
+                                (prefix, collection + '0')).fetchall()
         return [{'id': p[len(prefix):], **json.loads(b)} for p, b in rows if '/' not in p[len(prefix):]]
 
     def _apply(self, writes: list[tuple[str, dict | None]]):
@@ -106,6 +138,8 @@ class Store:
                         self.sql.execute('DELETE FROM docs WHERE path=?', (path,))
                     else:
                         self.sql.execute('INSERT OR REPLACE INTO docs VALUES (?,?)', (path, json.dumps(body, ensure_ascii=False)))
+        if writes:
+            self._shared_revision.value += 1
 
     async def _run(self, func, *args):
         def locked():
@@ -113,15 +147,17 @@ class Store:
                 return func(*args)
         return await asyncio.to_thread(locked)
 
+    def _teams(self) -> list[str]:
+        if self.db is not None:
+            # 부모 문서 없이 하위 컬렉션만 만들어진 구버전 팀도 찾는다.
+            names = {r.id for r in self.db.collection('teams').list_documents(timeout=12)}
+        else:
+            names = {p[0].split('/')[1] for p in self.sql.execute(
+                "SELECT path FROM docs WHERE path>='teams/' AND path<'teams0'")}
+        return sorted(names | {'A팀', '청팀', '백팀'})
+
     async def teams(self) -> list[str]:
-        def work():
-            if self.db is not None:
-                # 부모 문서 없이 하위 컬렉션만 만들어진 구버전 팀도 찾는다.
-                names = {r.id for r in self.db.collection('teams').list_documents(timeout=12)}
-            else:
-                names = {p[0].split('/')[1] for p in self.sql.execute("SELECT path FROM docs WHERE substr(path,1,6)='teams/'")}
-            return sorted(names | {'A팀', '청팀', '백팀'})
-        return await self._run(work)
+        return await self._run(self._teams)
 
     async def create_team(self, team: str):
         team = clean_name(team, '팀 이름')
@@ -216,7 +252,61 @@ class Store:
         return sorted([{'source': 'youtube', **d, 'name': d['id'], 'category': category, 'volumePercent': saved_volume_percent(d)} for d in rows], key=lambda d: d['name'])
 
     async def library(self, team: str) -> dict[str, list[dict]]:
-        return {category: await self.songs(team, category) for category in SONG_CATEGORIES}
+        team = clean_name(team)
+        def work():
+            return {category: self._song_rows(self._list(f'teams/{team}/{SONG_COLLECTIONS[category]}'), category)
+                    for category in SONG_CATEGORIES}
+        return await self._run(work)
+
+    @staticmethod
+    def _song_rows(rows: list[dict], category: str) -> list[dict]:
+        return sorted([{'source': 'youtube', **d, 'name': d['id'], 'category': category,
+                        'volumePercent': saved_volume_percent(d)} for d in rows], key=lambda d: d['name'])
+
+    async def dashboard_snapshot(self, requested_team: str = '', guild_id: int | None = None,
+                                 slot: str = 'primary') -> dict:
+        """Read a consistent dashboard in one executor dispatch, without caching accounts.
+
+        SQLite reads one indexed team subtree instead of separately scanning every
+        library/lineup/event collection. Firebase retains its original collection
+        paths and queries. Committed local/Discord writes invalidate cached results.
+        """
+        if requested_team:
+            requested_team = clean_name(requested_team, '팀 이름')
+        def work():
+            teams = self._teams()
+            guild = (self._read(f'guilds/{guild_id}') or {}) if guild_id is not None else {}
+            key = self._slot_key(slot, 'team', 'teamSecondary')
+            active = (guild.get(key, '백팀' if slot == 'secondary' else '청팀')
+                      if guild_id is not None else 'A팀')
+            team = clean_name(requested_team or active, '팀 이름')
+            if team not in teams:
+                teams.append(team)
+            prefix = f'teams/{team}/'
+            if self.db is None:
+                rows = self.sql.execute('SELECT path,body FROM docs WHERE path>=? AND path<?',
+                                        (prefix, f'teams/{team}0')).fetchall()
+                documents = {path[len(prefix):]: json.loads(raw) for path, raw in rows}
+                def collection(name):
+                    start = name + '/'
+                    return [{'id': path[len(start):], **value} for path, value in documents.items()
+                            if path.startswith(start) and '/' not in path[len(start):]]
+                volume = documents.get('state/volume') or {}
+                game = documents.get('state/game') or {}
+            else:
+                def collection(name):
+                    return self._list(prefix + name)
+                volume = self._read(prefix + 'state/volume') or {}
+                game = self._read(prefix + 'state/game') or {}
+            library = {category: self._song_rows(collection(SONG_COLLECTIONS[category]), category)
+                       for category in SONG_CATEGORIES}
+            lineup = {row['id']: row.get('name', '') for row in collection('lineup')}
+            return {'revision': self.revision, 'teams': teams, 'team': team, 'activeTeam': active,
+                    'library': library, 'events': {row['id']: row for row in collection('events')},
+                    'lineup': {str(i): lineup.get(str(i), '') for i in range(1, 10)},
+                    'state': {'volume': max(0.0, min(1.0, float(volume.get('value', .5)))),
+                              'currentOrder': int(game.get('currentOrder', 1))}}
+        return await self._run(work)
 
     async def song(self, team: str, name: str, category: str = 'entrance') -> dict | None:
         category, name = song_category(category), clean_name(name)

@@ -54,14 +54,18 @@ async def notify(channel, text=None, *, embed=None):
 
 class AppearanceBot(commands.Bot):
     def __init__(self, settings: Settings, *, slot: str = 'primary', label: str | None = None,
-                 command_prefix: str = '!', web_owner: bool = True):
-        intents = discord.Intents.default()
+                 command_prefix: str = '!', web_owner: bool = True, youtube_resolver=None):
+        intents = discord.Intents.none()
+        intents.guilds = True
+        intents.messages = True
         intents.message_content = True
         intents.voice_states = True
         # 통화방 입장 이벤트에는 members privileged intent가 필수가 아니다.
         intents.members = settings.enable_members_intent
         super().__init__(command_prefix=command_prefix, intents=intents, help_command=None,
-                         allowed_mentions=discord.AllowedMentions.none())
+                         allowed_mentions=discord.AllowedMentions.none(), max_messages=None,
+                         member_cache_flags=discord.MemberCacheFlags.from_intents(intents),
+                         chunk_guilds_at_startup=False)
         self.settings = settings
         self.slot = 'secondary' if slot == 'secondary' else 'primary'
         self.label = label or (settings.secondary_bot_label if self.slot == 'secondary' else settings.primary_bot_label)
@@ -69,7 +73,7 @@ class AppearanceBot(commands.Bot):
         self.peer_bot: AppearanceBot | None = None
         self.store = Store(settings)
         self.assets = Assets(settings)
-        self.player = Player(settings, self.store, self.assets)
+        self.player = Player(settings, self.store, self.assets, youtube_resolver=youtube_resolver)
         self.panel = WebPanel(self) if self.web_owner else None
         self.idle_tasks: dict[int, asyncio.Task] = {}
         self.join_cooldowns: dict[tuple[int, int], float] = {}
@@ -701,8 +705,9 @@ def install_commands(bot: AppearanceBot):
 
 
 def create_bot(settings: Settings, *, slot: str = 'primary', label: str | None = None,
-               command_prefix: str = '!', web_owner: bool = True) -> AppearanceBot:
-    bot = AppearanceBot(settings, slot=slot, label=label, command_prefix=command_prefix, web_owner=web_owner)
+               command_prefix: str = '!', web_owner: bool = True, youtube_resolver=None) -> AppearanceBot:
+    bot = AppearanceBot(settings, slot=slot, label=label, command_prefix=command_prefix,
+                        web_owner=web_owner, youtube_resolver=youtube_resolver)
     install_commands(bot)
     return bot
 
@@ -722,7 +727,7 @@ async def run():
         secondary_settings = replace(settings, token=settings.secondary_token, web_enabled=False)
         secondary = create_bot(
             secondary_settings, slot='secondary', label=settings.secondary_bot_label,
-            command_prefix='!2', web_owner=False,
+            command_prefix='!2', web_owner=False, youtube_resolver=primary.player.youtube,
         )
         primary.peer_bot = secondary
         secondary.peer_bot = primary

@@ -6,10 +6,11 @@ import logging
 import os
 import random
 import shlex
+import subprocess
+import weakref
 from collections import defaultdict
 from pathlib import Path
 import discord
-import yt_dlp
 from assets import Assets
 from config import Settings
 from storage import Store
@@ -17,21 +18,24 @@ from validation import youtube_url, time_range
 from voice import VoiceManager, VoiceError
 from event_tracks import event_tracks
 from validation import EVENTS, song_category, saved_volume_percent
+from youtube_resolver import YouTubeResolver
+from audio_runtime import voice_play_options
 
 log = logging.getLogger(__name__)
 
 
 class Player:
-    def __init__(self, settings: Settings, store: Store, assets: Assets):
+    def __init__(self, settings: Settings, store: Store, assets: Assets, *, youtube_resolver=None):
         self.settings, self.store, self.assets = settings, store, assets
         self.voice = VoiceManager()
         self.generation = defaultdict(int)
         self.now: dict[int, dict] = {}
-        self.extract_slots = asyncio.Semaphore(2)
         self.extract_tasks: set[asyncio.Task] = set()
+        self.preparing: dict[int, asyncio.Task] = {}
         self.event_sequence = defaultdict(int)
         self.event_signatures = {}
         self.cookie_path = self._cookies()
+        self.youtube = youtube_resolver or YouTubeResolver(settings, self.cookie_path)
 
     def _cookies(self) -> str | None:
         if self.settings.cookies_path:
@@ -50,32 +54,17 @@ class Player:
             return str(path)
         return None
 
-    def _extract(self, url: str) -> dict:
-        opts = {
-            'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True,
-            'socket_timeout': 15, 'noplaylist': True, 'retries': 1, 'extractor_retries': 1,
-            'cachedir': False,
-        }
-        if self.cookie_path:
-            opts['cookiefile'] = self.cookie_path
-        # TLS 검사 유지. 구버전의 android/web 클라이언트 강제 지정 제거.
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        if not isinstance(info, dict) or not info.get('url'):
-            raise ValueError('오디오 주소를 가져오지 못했습니다.')
-        if info.get('is_live'):
-            raise ValueError('라이브 방송은 등장곡 구간 재생을 지원하지 않습니다.')
-        if not str(info['url']).startswith('https://'):
-            raise ValueError('안전한 오디오 주소가 아닙니다.')
-        return info
-
     async def _extract_limited(self, url: str) -> dict:
-        # 외부 timeout 시에도 스레드는 즉시 멈추지 않는다. 작업 종료까지 슬롯을 유지한다.
-        async with self.extract_slots:
-            return await asyncio.to_thread(self._extract, url)
+        return await self.youtube.resolve(url)
+
+    def _cancel_preparation(self, guild_id: int):
+        task = self.preparing.pop(guild_id, None)
+        if task and not task.done():
+            task.cancel()
 
     def stop(self, guild):
         self.generation[guild.id] += 1
+        self._cancel_preparation(guild.id)
         vc = guild.voice_client
         if vc and (vc.is_playing() or vc.is_paused()):
             vc.stop()
@@ -92,11 +81,24 @@ class Player:
 
     def _source(self, target, *, before: str, options: str, master: float, record: dict | None, team: str):
         percent = saved_volume_percent(record)
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(str(target), executable=self.settings.ffmpeg,
-                                  before_options=before, options=options),
-            volume=master * percent / 100,
-        )
+        decoder = discord.FFmpegPCMAudio(str(target), executable=self.settings.ffmpeg,
+                                        before_options=f'{before} -threads {self.settings.ffmpeg_threads}',
+                                        options=f'{options} -threads {self.settings.ffmpeg_threads} -filter_threads 1')
+        if isinstance(getattr(decoder, '_process', None), subprocess.Popen):
+            # FFmpeg can report an expired/blocked stream as EOF with no audio.
+            # A weak reference avoids a retained decoder/read-closure cycle.
+            decoder.appearance_frame_count = 0
+            decoder_ref, decoder_type = weakref.ref(decoder), type(decoder)
+            def counted_read():
+                current = decoder_ref()
+                if current is None:
+                    return b''
+                data = decoder_type.read(current)
+                if data:
+                    current.appearance_frame_count += 1
+                return data
+            decoder.read = counted_read
+        source = discord.PCMVolumeTransformer(decoder, volume=master * percent / 100)
         # The single PCM multiplication avoids clipping a boosted track BEFORE
         # a low master gain is applied. Master edits must retain the track gain.
         source.appearance_song_percent = percent
@@ -108,6 +110,7 @@ class Player:
         if not await self._auto_permitted(auto_revision):
             return False
         self.generation[guild.id] += 1
+        self._cancel_preparation(guild.id)
         generation = self.generation[guild.id]
         a, b = time_range(song.get('start', 0), song.get('end', 30))
         duration = min(5, b - a) if preview else b - a
@@ -124,14 +127,23 @@ class Player:
                 url = youtube_url(song.get('url'))
                 task = asyncio.create_task(self._extract_limited(url))
                 self.extract_tasks.add(task)
+                self.preparing[guild.id] = task
                 def done(t):
                     self.extract_tasks.discard(t)
+                    if self.preparing.get(guild.id) is t:
+                        self.preparing.pop(guild.id, None)
                     if not t.cancelled():
                         t.exception()  # timeout 이후의 백그라운드 실패도 회수한다.
                 task.add_done_callback(done)
                 try:
                     info = await asyncio.wait_for(asyncio.shield(task), timeout=50)
-                except (asyncio.TimeoutError, yt_dlp.utils.DownloadError, ValueError) as exc:
+                except asyncio.CancelledError:
+                    if generation != self.generation[guild.id]:
+                        return False
+                    task.cancel()
+                    raise
+                except (asyncio.TimeoutError, ValueError) as exc:
+                    task.cancel()
                     log.warning('YouTube 추출 실패: %s', type(exc).__name__)
                     raise ValueError('YouTube 오디오를 가져오지 못했습니다. 영상 공개 여부·호스팅 IP 제한을 확인하세요. 직접 MP3 업로드로도 재생할 수 있습니다.') from exc
                 target = info['url']
@@ -163,6 +175,8 @@ class Player:
                 return False
             source = self._source(target, before=before, options=f'-vn -t {duration:.3f}',
                                   master=state['volume'], record=song, team=team)
+            if song.get('source', 'youtube') != 'upload':
+                source.appearance_youtube_url = url
             self._start(guild, vc, source, generation, song.get('name', '등장곡'), team)
             if order is not None:
                 await self.store.set_order(team, int(order))
@@ -177,16 +191,32 @@ class Player:
             vc.stop()
         loop = asyncio.get_running_loop()
         def completed(error):
+            # PCMVolumeTransformer does not forward FFmpeg's internal error.
+            # Capture it before Discord cleans up the decoder on its thread.
+            decoder = getattr(source, 'original', None)
+            internal_error = getattr(decoder, '_current_error', None)
+            process = getattr(decoder, '_process', None)
+            exit_code = process.poll() if isinstance(process, subprocess.Popen) else None
+            if error is None:
+                if isinstance(internal_error, BaseException):
+                    error = internal_error
+                elif (isinstance(exit_code, int) and exit_code != 0) or getattr(decoder, 'appearance_frame_count', None) == 0:
+                    error = RuntimeError('오디오 데이터를 재생하지 못했습니다.')
             def publish():
                 if self.generation[guild.id] == generation:
                     self.now[guild.id] = {'title': title, 'team': team, 'status': 'error' if error else 'finished'}
                     if error:
+                        # A provider can revoke a stream before its advertised
+                        # expiry. The user's next play must obtain a fresh URL.
+                        url = getattr(source, 'appearance_youtube_url', None)
+                        if url:
+                            self.youtube.invalidate(url)
                         self.now[guild.id]['error'] = '오디오 재생이 중단됐습니다. FFmpeg와 원본 파일/링크를 확인하세요.'
                         log.error('오디오 재생 오류: guild=%s (%s)', guild.id, type(error).__name__)
             if not loop.is_closed():
                 loop.call_soon_threadsafe(publish)
         try:
-            vc.play(source, after=completed)
+            vc.play(source, after=completed, **voice_play_options(self.settings.audio_profile))
         except BaseException:
             source.cleanup()
             raise
@@ -244,6 +274,7 @@ class Player:
             path = random.choice(files)
 
         self.generation[guild.id] += 1
+        self._cancel_preparation(guild.id)
         generation = self.generation[guild.id]
         if generation != self.generation[guild.id]:
             return False
@@ -277,5 +308,8 @@ class Player:
                 current['songVolumePercent'] = percent
 
     async def close(self):
+        for task in list(self.extract_tasks):
+            task.cancel()
+        await self.youtube.close()
         if self.extract_tasks:
             await asyncio.gather(*self.extract_tasks, return_exceptions=True)

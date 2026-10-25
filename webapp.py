@@ -23,12 +23,23 @@ from persistence import storage_status
 from backups import write_music_backup
 from permissions import allowed, required_capability, ROLE_LABELS, ROLE_CAPABILITIES
 from event_tracks import event_tracks, MAX_EVENT_TRACKS
+from resource_usage import ResourceMeter
+from release import RELEASE
+from audio_runtime import audio_profile_info
 
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
 SESSION_TTL = 8 * 60 * 60
 USERNAME_RE = re.compile(r'^[a-z0-9_.-]{3,24}$')
 PBKDF2_ROUNDS = 310_000
+AUTH_WINDOW_SECONDS = 300
+AUTH_CLEANUP_SECONDS = 30
+AUTH_MAX_IP_BUCKETS = 1024
+AUTH_MAX_SESSIONS = 256
+AUTH_MAX_PENDING_HASHES = 16
+AUTH_MAX_REQUESTS = 32
+AUTH_HASH_CONCURRENCY = 2
+SIGNUP_ATTEMPTS_PER_WINDOW = 60
 
 def password_hash(password: str, salt: bytes | None = None) -> str:
     salt = salt or os.urandom(16)
@@ -55,7 +66,7 @@ def version(package: str) -> str:
 
 
 def response(data: dict | list, status: int = 200):
-    return web.json_response(data, status=status, dumps=lambda x: json.dumps(x, ensure_ascii=False, allow_nan=False))
+    return web.json_response(data, status=status, dumps=lambda x: json.dumps(x, ensure_ascii=False, allow_nan=False, separators=(',', ':')))
 
 
 async def body(request: web.Request) -> dict:
@@ -85,13 +96,21 @@ class WebPanel:
         self.assets = bot.assets
         self.sessions: dict[str, dict] = {}
         self.attempts: dict[str, deque] = defaultdict(deque)
+        self.signup_attempts: dict[str, deque] = defaultdict(deque)
+        self.next_auth_cleanup = 0.0
+        self.auth_hash_slots = asyncio.Semaphore(AUTH_HASH_CONCURRENCY)
+        self.auth_hash_pending = 0
+        self.auth_requests = 0
         self.runner = None
+        self.resource_meter = ResourceMeter()
         self.backup_lock = asyncio.Lock()
         self.account_lock = asyncio.Lock()
         # Firestore free-tier 보호: /api/state의 DB-backed 부분을 짧게 캐시합니다.
         # 실시간 음성 상태는 /api/live에서 별도로 갱신하므로 이 캐시는 음악/타순/상황 목록에만 영향합니다.
         self.state_cache: dict[tuple[str, str, str], dict] = {}
         self.state_cache_ttl = 300.0
+        self.state_cache_limit = 8
+        self.state_cache_lock = asyncio.Lock()
         self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
         self.app.add_routes([
             web.get('/', self.index),
@@ -175,6 +194,7 @@ class WebPanel:
     @web.middleware
     async def security(self, request, handler):
         try:
+            self._cleanup_auth()
             if request.path.startswith('/api/') and request.path not in {'/api/login', '/api/signup', '/api/connection'}:
                 authorization = request.headers.get('Authorization', '')
                 if authorization:
@@ -205,11 +225,14 @@ class WebPanel:
                     if not hmac.compare_digest(csrf.encode(), sess['csrf'].encode()):
                         raise web.HTTPForbidden(text='보안 토큰이 만료됐습니다. 새로고침 후 다시 시도하세요.')
             resp = await handler(request)
-            if request.path.startswith('/api/') and request.method not in {'GET', 'HEAD', 'OPTIONS'} and getattr(resp, 'status', 200) < 400:
-                # 웹에서 저장/수정/삭제/재생 제어를 한 직후에는 오래된 DB 캐시를 쓰지 않는다.
+            if request.path == '/api/upload' and request.method == 'POST' and getattr(resp, 'status', 200) < 400:
+                # DB writes invalidate snapshots through Store.revision, including
+                # Discord/secondary-bot changes. Joining/stopping need not reload a library.
                 self.state_cache.clear()
         except web.HTTPException as exc:
-            resp = response({'error': exc.text if exc.status in {401, 403} else exc.reason}, exc.status)
+            resp = response({'error': exc.text if exc.status in {401, 403, 429} else exc.reason}, exc.status)
+            if exc.status == 429 and 'Retry-After' in exc.headers:
+                resp.headers['Retry-After'] = exc.headers['Retry-After']
         except (ValueError, KeyError, TypeError) as exc:
             resp = response({'error': str(exc)[:400]}, 400)
         except Exception as exc:
@@ -302,7 +325,7 @@ class WebPanel:
         # Safe, unauthenticated endpoint: checks API identity + CORS, not just a 200 page.
         bots = self.bot_targets()
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
-                         'authMode': 'bearer', 'web': 'ok', 'build': 'song-volume-20260926-1',
+                         'authMode': 'bearer', 'web': 'ok', 'build': 'song-volume-20260926-1', 'release': RELEASE,
                          'capabilities': ['song-volume', 'event-track-volume', 'library-categories', 'atomic-rename', 'storage-check',
                                           'roles-v3', 'global-autoplay', 'stage-voice', 'event-all-categories', 'event-delete-restore', 'original-name-backup', 'pwa', 'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
@@ -312,17 +335,92 @@ class WebPanel:
     async def _ensure_admin(self):
         async with self.account_lock:
             if self.s.web_password and await self.store.web_user('admin') is None:
-                hashed = await asyncio.to_thread(password_hash, self.s.web_password)
+                hashed = await self._password_work(password_hash, self.s.web_password)
                 await self.store.save_web_user('admin', {'passwordHash': hashed, 'displayName':'관리자',
                     'role':'admin', 'enabled':True, 'createdAt':int(time.time())})
 
+    def _cleanup_auth(self, *, force=False):
+        """Bound auth memory on traffic; no always-running maintenance task."""
+        now = time.monotonic()
+        if not force and now < self.next_auth_cleanup:
+            return
+        self.next_auth_cleanup = now + AUTH_CLEANUP_SECONDS
+        for key, session in list(self.sessions.items()):
+            if session['expires'] <= now:
+                self.sessions.pop(key, None)
+        for buckets in (self.attempts, self.signup_attempts):
+            for ip, window in list(buckets.items()):
+                while window and now - window[0] > AUTH_WINDOW_SECONDS:
+                    window.popleft()
+                if not window:
+                    buckets.pop(ip, None)
+
+    def _limit_auth_attempt(self, request, buckets, limit: int, message: str):
+        self._cleanup_auth()
+        now = time.monotonic()
+        ip = request.remote or 'unknown'
+        if ip not in buckets and len(buckets) >= AUTH_MAX_IP_BUCKETS:
+            self._cleanup_auth(force=True)
+            if len(buckets) >= AUTH_MAX_IP_BUCKETS:
+                raise web.HTTPTooManyRequests(text='인증 요청이 많습니다. 잠시 후 다시 시도하세요.',
+                                              headers={'Retry-After': '30'})
+        window = buckets[ip]
+        while window and now - window[0] > AUTH_WINDOW_SECONDS:
+            window.popleft()
+        if len(window) >= limit:
+            raise web.HTTPTooManyRequests(text=message, headers={'Retry-After': '300'})
+        window.append(now)
+        return now, window
+
     def _limit_login(self, request):
-        now=time.monotonic(); ip=request.remote or 'unknown'; window=self.attempts[ip]
-        while window and now-window[0]>300: window.popleft()
-        if len(window)>=10: raise web.HTTPTooManyRequests(text='로그인 시도가 많습니다. 5분 뒤에 다시 시도하세요.')
-        window.append(now); return now, window
+        return self._limit_auth_attempt(request, self.attempts, 10,
+                                       '로그인 시도가 많습니다. 5분 뒤에 다시 시도하세요.')
+
+    def _limit_signup(self, request):
+        # request.remote can be a shared reverse proxy. Keep a generous,
+        # separate signup bucket so a team's signup does not block login.
+        return self._limit_auth_attempt(request, self.signup_attempts, SIGNUP_ATTEMPTS_PER_WINDOW,
+                                       '가입 요청이 많습니다. 5분 뒤에 다시 시도하세요.')
+
+    async def _password_work(self, operation, *args):
+        """Keep the existing hash strength, bound both CPU work and its queue."""
+        if self.auth_hash_pending >= AUTH_MAX_PENDING_HASHES:
+            raise web.HTTPTooManyRequests(text='인증 처리가 많습니다. 잠시 후 다시 시도하세요.',
+                                          headers={'Retry-After': '5'})
+        self.auth_hash_pending += 1
+        try:
+            async with self.auth_hash_slots:
+                task = asyncio.create_task(asyncio.to_thread(operation, *args))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # Cancelling an HTTP request cannot stop an active CPU
+                    # thread. Keep its slot until that thread really finishes.
+                    try:
+                        await asyncio.shield(task)
+                    except Exception:
+                        pass
+                    raise
+        finally:
+            self.auth_hash_pending -= 1
+
+    async def _auth_request(self, operation, *args):
+        # Admission also covers requests waiting on the account/bootstrap lock,
+        # before they reach the bounded hashing queue.
+        if self.auth_requests >= AUTH_MAX_REQUESTS:
+            raise web.HTTPTooManyRequests(text='인증 요청이 많습니다. 잠시 후 다시 시도하세요.',
+                                          headers={'Retry-After': '5'})
+        self.auth_requests += 1
+        try:
+            return await operation(*args)
+        finally:
+            self.auth_requests -= 1
 
     async def signup(self, request):
+        self._limit_signup(request)
+        return await self._auth_request(self._signup, request)
+
+    async def _signup(self, request):
         await self._ensure_admin(); d=await body(request)
         username=str(d.get('username','')).strip().lower(); display=str(d.get('displayName','')).strip(); password=str(d.get('password',''))
         if not USERNAME_RE.fullmatch(username) or username=='admin': raise ValueError('아이디는 영문 소문자, 숫자, _, -, . 조합 3~24자로 입력하세요.')
@@ -330,18 +428,27 @@ class WebPanel:
         if not 10<=len(password)<=128: raise ValueError('비밀번호는 10자 이상으로 입력하세요.')
         async with self.account_lock:
             if await self.store.web_user(username): raise ValueError('이미 사용 중인 아이디입니다.')
-            hashed = await asyncio.to_thread(password_hash, password)
+            hashed = await self._password_work(password_hash, password)
             await self.store.save_web_user(username, {'passwordHash':hashed,'displayName':display,'role':'pending','enabled':True,'createdAt':int(time.time())})
         return response({'ok':True,'message':'가입 신청 완료! 관리자가 유저·재생자·등록/삭제자 중 하나로 승인하면 로그인할 수 있습니다.'},201)
 
     async def login(self, request):
-        await self._ensure_admin(); now,window=self._limit_login(request); d=await body(request)
+        now,window=self._limit_login(request)
+        return await self._auth_request(self._login, request, now, window)
+
+    async def _login(self, request, now, window):
+        await self._ensure_admin(); d=await body(request)
         mode=d.get('authMode','cookie'); username=str(d.get('username') or 'admin').strip().lower(); supplied=str(d.get('password',''))
         if mode not in {'cookie','bearer'}: raise ValueError('지원하지 않는 로그인 방식입니다.')
         user=await self.store.web_user(username)
-        if not user or not await asyncio.to_thread(password_ok,supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
+        if not user or not await self._password_work(password_ok,supplied,user.get('passwordHash','')): raise web.HTTPUnauthorized(text='아이디 또는 비밀번호가 맞지 않습니다.')
         if not user.get('enabled',True): raise web.HTTPForbidden(text='사용이 중지된 계정입니다.')
         if not allowed(user.get('role'), 'read'): raise web.HTTPForbidden(text='관리자 승인 대기 중입니다.')
+        if len(self.sessions) >= AUTH_MAX_SESSIONS:
+            self._cleanup_auth(force=True)
+            if len(self.sessions) >= AUTH_MAX_SESSIONS:
+                raise web.HTTPTooManyRequests(text='로그인 중인 창이 많습니다. 사용하지 않는 창에서 로그아웃한 뒤 다시 시도하세요.',
+                                              headers={'Retry-After': '30'})
         window.clear(); key,csrf=secrets.token_urlsafe(40),secrets.token_urlsafe(32)
         sess={'expires':now+SESSION_TTL,'csrf':csrf,'mode':mode,'origin':self.request_origin(request),'username':username,'displayName':user.get('displayName',username),'role':user.get('role')}
         self.sessions[key]=sess; payload={'ok':True,'csrf':csrf,'user':{'username':username,'displayName':sess['displayName'],'role':sess['role']}}
@@ -422,6 +529,70 @@ class WebPanel:
         guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
         return response(self._live_payload(target_bot, guild, target))
 
+    def _decorate_snapshot(self, snapshot: dict) -> dict:
+        """File metadata work shares one executor dispatch, outside the voice loop."""
+        library = snapshot['library']
+        metadata = {}
+        for songs in library.values():
+            for song in songs:
+                asset_id = song.get('assetId')
+                if not asset_id:
+                    continue
+                if asset_id not in metadata:
+                    try:
+                        metadata[asset_id] = self.assets.get(asset_id)
+                    except (ValueError, OSError):
+                        metadata[asset_id] = None
+                meta = metadata[asset_id]
+                if meta is None:
+                    # A broken file never removes the record, ID, or saved ordering.
+                    song['fileMissing'] = True
+                else:
+                    song['filename'] = meta['name']
+                    song['fileDuration'] = meta['duration']
+        events = snapshot['events']
+        return {
+            'webOnly': self.s.web_only,
+            'storage': self.store.mode,
+            'teams': snapshot['teams'],
+            'team': snapshot['team'],
+            'activeTeam': snapshot['activeTeam'],
+            'songs': library['entrance'],
+            'library': library,
+            'categories': SONG_CATEGORIES,
+            'fileStorage': storage_status(self.s),
+            'lineup': snapshot['lineup'],
+            'state': snapshot['state'],
+            'events': self._event_rows(events),
+            'deletedEvents': [{'key': k, 'label': d.get('label') or EVENTS.get(k, k)}
+                              for k, d in events.items() if d.get('deleted')],
+            'songVolumeEnabled': True,
+            'maxEventTracks': MAX_EVENT_TRACKS,
+            'maxUploadMb': self.s.max_upload_mb,
+        }
+
+    async def _cached_state(self, target: str, guild, requested_team: str) -> dict:
+        key = (target, str(guild.id) if guild else '', requested_team)
+        def valid():
+            cached = self.state_cache.get(key)
+            return cached if (cached and cached['revision'] == self.store.revision
+                              and time.monotonic() - cached['at'] < self.state_cache_ttl) else None
+        cached = valid()
+        if cached:
+            return cached['data']
+        # Concurrent tabs share one cache fill instead of duplicating every DB/file read.
+        async with self.state_cache_lock:
+            cached = valid()
+            if cached:
+                return cached['data']
+            snapshot = await self.store.dashboard_snapshot(requested_team, guild.id if guild else None, target)
+            static = await asyncio.to_thread(self._decorate_snapshot, snapshot)
+            self.state_cache[key] = {'at': time.monotonic(), 'revision': snapshot['revision'], 'data': static}
+            while len(self.state_cache) > self.state_cache_limit:
+                oldest = min(self.state_cache, key=lambda k: self.state_cache[k]['at'])
+                self.state_cache.pop(oldest, None)
+            return static
+
     async def state(self, request):
         await self.store.playback_settings()
         target = 'secondary' if request.query.get('bot_target') == 'secondary' else 'primary'
@@ -430,53 +601,9 @@ class WebPanel:
         guild_id = request.query.get('guild_id')
         guild = target_bot.get_guild(int(guild_id)) if guild_id and guild_id.isdigit() else (target_bot.guilds[0] if target_bot.guilds else None)
         requested_team = request.query.get('team') or ''
-        cache_key = (target, str(guild.id) if guild else '', requested_team)
-        now = time.monotonic()
-        cached = self.state_cache.get(cache_key)
-        if cached and now - cached['at'] < self.state_cache_ttl:
-            static = dict(cached['data'])
-        else:
-            teams = await self.store.teams()
-            active = await self.store.get_team(guild.id, target) if guild else 'A팀'
-            team = clean_name(requested_team or active, '팀 이름')
-            if team not in teams:
-                teams.append(team)
-            state = await self.store.state(team)
-            events = {e['id']: e for e in await self.store.events(team)}
-            library = await self.store.library(team)
-            for songs in library.values():
-                for song in songs:
-                    if song.get('assetId'):
-                        try:
-                            meta = await asyncio.to_thread(self.assets.get, song['assetId'])
-                            song['filename'] = meta['name']
-                            song['fileDuration'] = meta['duration']
-                        except (ValueError, OSError):
-                            # Preserve the record and ID. Never hide/delete a missing audio row.
-                            song['fileMissing'] = True
-            static = {
-                'webOnly': self.s.web_only,
-                'storage': self.store.mode,
-                'teams': teams,
-                'team': team,
-                'activeTeam': active,
-                'songs': library['entrance'],
-                'library': library,
-                'categories': SONG_CATEGORIES,
-                'fileStorage': storage_status(self.s),
-                'lineup': await self.store.lineup(team),
-                'state': state,
-                'events': self._event_rows(events),
-                'deletedEvents': [{'key': k, 'label': d.get('label') or EVENTS.get(k, k)} for k, d in events.items() if d.get('deleted')],
-                'songVolumeEnabled': True,
-                'maxEventTracks': MAX_EVENT_TRACKS,
-                'maxUploadMb': self.s.max_upload_mb,
-            }
-            self.state_cache[cache_key] = {'at': now, 'data': static}
-            # 방치된 키가 계속 늘지 않게 작게 제한한다.
-            if len(self.state_cache) > 64:
-                oldest = min(self.state_cache, key=lambda k: self.state_cache[k]['at'])
-                self.state_cache.pop(oldest, None)
+        if requested_team:
+            requested_team = clean_name(requested_team, '팀 이름')
+        static = await self._cached_state(target, guild, requested_team)
 
         channels = []
         live = self._live_payload(target_bot, guild, target)
@@ -815,7 +942,13 @@ class WebPanel:
                          'voice': player.voice.status(guild), 'nowPlaying': player.now.get(guild.id)})
 
     async def diagnostics(self, request):
+        resources = (await asyncio.to_thread(self.resource_meter.snapshot)
+                     if request['session'].get('role') == 'admin' else None)
         return response({
+            'release': RELEASE,
+            'audioProfile': self.s.audio_profile,
+            'audioProfileInfo': audio_profile_info(self.s.audio_profile),
+            **({'resources': resources} if resources is not None else {}),
             'discordReady': self.bot.is_ready(), 'webOnly': self.s.web_only,
             'bots': self.bot_targets(),
             'storage': self.store.mode, 'fileStorage': storage_status(self.s),
