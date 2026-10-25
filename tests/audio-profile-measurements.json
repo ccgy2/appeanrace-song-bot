@@ -1,0 +1,84 @@
+{
+  "source": "sounds/homerun.mp3",
+  "python": "3.12.14",
+  "discord_py": "2.7.1",
+  "opus": "libopus 1.4",
+  "gain": 0.5,
+  "audio_seconds": 30.0,
+  "frames_per_run": 1500,
+  "repeats": 5,
+  "decode_cpu_seconds_median": 0.144687,
+  "decode_cpu_seconds_samples": [
+    0.135469,
+    0.14316299999999998,
+    0.174765,
+    0.14622799999999994,
+    0.144687
+  ],
+  "profiles": {
+    "standard": {
+      "encoder_cpu_seconds_median": 1.000305,
+      "packet_payload_bytes_median": 447312,
+      "runs": [
+        {
+          "encoder_cpu_seconds": 0.94044,
+          "packet_payload_bytes": 447312,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 1.036886,
+          "packet_payload_bytes": 447312,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 0.951704,
+          "packet_payload_bytes": 447312,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 1.049519,
+          "packet_payload_bytes": 447312,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 1.000305,
+          "packet_payload_bytes": 447312,
+          "decoded_frames": 1500
+        }
+      ]
+    },
+    "economy": {
+      "encoder_cpu_seconds_median": 0.200641,
+      "packet_payload_bytes_median": 367909,
+      "runs": [
+        {
+          "encoder_cpu_seconds": 0.195949,
+          "packet_payload_bytes": 367909,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 0.197126,
+          "packet_payload_bytes": 367909,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 0.200641,
+          "packet_payload_bytes": 367909,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 0.214867,
+          "packet_payload_bytes": 367909,
+          "decoded_frames": 1500
+        },
+        {
+          "encoder_cpu_seconds": 0.217036,
+          "packet_payload_bytes": 367909,
+          "decoded_frames": 1500
+        }
+      ]
+    }
+  },
+  "scope": "Local decoding and native Opus only; no Discord network, encryption, bot DB or billing measurement. Packet bytes exclude transport overhead.",
+  "tradeoff": "Economy uses 96 kbps and disables Opus in-band FEC; packet loss may be more audible. Both profiles retain dynamic PCM volume and full audio bandwidth."
+}

@@ -1,0 +1,198 @@
+{
+  "memory": {
+    "environment": "Linux Python 3.12.14, discord.py 2.7.1, no real Discord connection, fresh process per sample",
+    "runs": [
+      {
+        "source": "baseline",
+        "bots": 1,
+        "median_rss_mib": 57.38,
+        "samples": [
+          {
+            "bots": 1,
+            "rss_bytes": 72749056,
+            "rss_mib": 69.38,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 60149760,
+            "rss_mib": 57.36,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 60227584,
+            "rss_mib": 57.44,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 60166144,
+            "rss_mib": 57.38,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 60129280,
+            "rss_mib": 57.34,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          }
+        ]
+      },
+      {
+        "source": "project",
+        "bots": 1,
+        "median_rss_mib": 43.34,
+        "samples": [
+          {
+            "bots": 1,
+            "rss_bytes": 45465600,
+            "rss_mib": 43.36,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 45449216,
+            "rss_mib": 43.34,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 45400064,
+            "rss_mib": 43.3,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 45481984,
+            "rss_mib": 43.38,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 1,
+            "rss_bytes": 45371392,
+            "rss_mib": 43.27,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          }
+        ]
+      },
+      {
+        "source": "baseline",
+        "bots": 2,
+        "median_rss_mib": 57.58,
+        "samples": [
+          {
+            "bots": 2,
+            "rss_bytes": 60379136,
+            "rss_mib": 57.58,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 60473344,
+            "rss_mib": 57.67,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 60338176,
+            "rss_mib": 57.54,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 60329984,
+            "rss_mib": 57.54,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 60428288,
+            "rss_mib": 57.63,
+            "yt_dlp_loaded": true,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          }
+        ]
+      },
+      {
+        "source": "project",
+        "bots": 2,
+        "median_rss_mib": 43.45,
+        "samples": [
+          {
+            "bots": 2,
+            "rss_bytes": 45543424,
+            "rss_mib": 43.43,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 45514752,
+            "rss_mib": 43.41,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 45707264,
+            "rss_mib": 43.59,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 45559808,
+            "rss_mib": 43.45,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          },
+          {
+            "bots": 2,
+            "rss_bytes": 45772800,
+            "rss_mib": 43.65,
+            "yt_dlp_loaded": false,
+            "scope": "no-login Linux startup; no live traffic/audio"
+          }
+        ]
+      }
+    ]
+  },
+  "state_api": {
+    "scenario": "one cold /api/state, no guild, three categories with 20 songs each, warm playback settings",
+    "before": {
+      "songs": 60,
+      "cold_state_executor_dispatches": 7,
+      "cold_state_sql_selects": 8,
+      "json_response_bytes": 17367
+    },
+    "after": {
+      "songs": 60,
+      "cold_state_executor_dispatches": 2,
+      "cold_state_sql_selects": 2,
+      "json_response_bytes": 15829
+    },
+    "equivalent_response_except_temp_storage_paths": true
+  },
+  "polling": {
+    "old_interval_seconds": 10,
+    "new_playing_seconds": 10,
+    "new_connected_idle_seconds": 30,
+    "new_disconnected_idle_seconds": 60,
+    "scope": "one visible authenticated page; periodic requests only"
+  }
+}
