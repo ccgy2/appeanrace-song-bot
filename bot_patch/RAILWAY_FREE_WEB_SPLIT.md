@@ -1,3 +1,5 @@
+> 2026-10-25: 이 폴더는 선택적 이전 배포 패치 사본입니다. 이번 절약 버전은 루트의 전체 소스와 `youtube_resolver.py`, `youtube_worker.py`까지 함께 반영해야 합니다. 두 파일만 복사해 전체 절약 업데이트가 완료되는 것은 아닙니다. 2차 버전은 `audio_runtime.py`, `resource_usage.py`, `release.py`도 필요합니다. 먼저 `RAILWAY_COST_REDUCTION_V2.md`를 확인하세요.
+
 # Railway 봇/API + GitHub Pages 무료 웹 분리
 
 1. BOT 패치의 `config.py`, `webapp.py`를 기존 저장소 루트에 덮어쓰고 GitHub에 커밋합니다.
