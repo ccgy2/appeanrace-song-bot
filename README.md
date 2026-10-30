@@ -1,6 +1,12 @@
 # APPEARANCE — 음악·경기 사운드 컨트롤
 
-현재 수정본: **resource-saving-20261025-2**. **[2차 Railway 절약형 적용 안내](RAILWAY_COST_REDUCTION_V2.md)를 먼저 읽고 봇 + 웹사이트를 모두 적용하세요.**
+현재 수정본: **lineup-sound-order-20261030-1**. **[타순 권한·경기 사운드 정렬 적용 안내](UPDATE_LINEUP_SOUND_ORDER_20261030.md)를 먼저 읽고 봇 + 웹사이트를 모두 적용하세요.**
+
+등장곡 등록/삭제자와 재생자가 타순을 선택·저장할 수 있습니다. 경기 사운드는 `카드 순서 편집`에서 맨 위·위·아래·맨 아래로 이동하며, 내 브라우저에 계정·팀별 순서를 자동 저장합니다. 팀·회원·백업 관리 권한은 관리자에게 유지됩니다. [이번 검증 결과](TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md)를 함께 제공합니다.
+
+이전 절약형 설정과 기존 기능은 유지했습니다. 아래는 이전 업데이트 설명입니다.
+
+**[2차 Railway 절약형 적용 안내](RAILWAY_COST_REDUCTION_V2.md)**
 
 1차 최적화에 음성 인코딩 절약형(96kbps, 패킷 손실 보정 끔), 인증 자원 상한, 실제 서버 사용량 진단과 적용 버전 표시를 추가했습니다. Railway Docker/Nixpacks 배포 기본값은 economy이며, 불안정한 네트워크에는 AUDIO_PROFILE=standard를 사용할 수 있습니다. 기존 음원·계정·볼륨 기능은 유지하며 데이터 마이그레이션은 없습니다. [2차 검증 결과](TEST_REPORT_ECONOMY_V2.md)도 함께 제공합니다.
 
@@ -41,7 +47,7 @@ python main.py
 python -m unittest discover -s tests -v
 python -m compileall -q .
 node --check static/app.js
-node scripts/check-hosting.cjs
+node 웹사이트/scripts/check-hosting.cjs
 ```
 
 Python Discord 라이브러리까지 설치해야 원본 `test_voice.py`를 포함한 전체 검색 테스트를 실행할 수 있습니다. 이번 작업 환경에서 실제로 실행한 테스트 묶음과 미검증 항목은 [TEST_REPORT_LIBRARY.md](TEST_REPORT_LIBRARY.md)에 구분했습니다. 이전 버전의 테스트 보고서는 이번 버전의 검증 결과가 아닙니다.

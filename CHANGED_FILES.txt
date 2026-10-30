@@ -1,0 +1,31 @@
+lineup-sound-order-20261030-1
+
+Modified code and documentation:
+ACCOUNT_SETUP.md
+README.md
+bot_patch/webapp.py
+permissions.py
+release.py
+static/app.js
+static/index.html
+static/style.css
+static/sw.js
+tests/test_studio_update.py
+webapp.py
+웹사이트/ACCOUNT_SETUP.md
+웹사이트/README.md
+웹사이트/static/app.js
+웹사이트/static/index.html
+웹사이트/static/style.css
+웹사이트/static/sw.js
+
+Added tests and guides:
+TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md
+UPDATE_LINEUP_SOUND_ORDER_20261030.md
+tests/test_lineup_permissions.py
+웹사이트/tests/browser-fixture.cjs
+웹사이트/tests/event-order.test.cjs
+웹사이트/tests/lineup-permissions.test.cjs
+웹사이트/tests/ui-regression.cjs
+tests/package-verification-20261030.json
+CHANGED_FILES.txt
