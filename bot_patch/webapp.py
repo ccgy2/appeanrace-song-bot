@@ -787,7 +787,12 @@ class WebPanel:
         values = data.get('lineup')
         if not isinstance(values, dict):
             raise ValueError('타순 데이터가 올바르지 않습니다.')
-        await self.store.save_lineup(clean_name(data.get('team')), values)
+        team = clean_name(data.get('team'))
+        # Saving a lineup creates its parent in storage. Keep team creation an
+        # admin operation even when registrars and players can manage a lineup.
+        if not allowed(request['session'].get('role'), 'teams') and team not in await self.store.teams():
+            raise web.HTTPForbidden(text='등록된 팀의 타순만 관리할 수 있습니다. 새 팀은 관리자가 만들어야 합니다.')
+        await self.store.save_lineup(team, values)
         return response({'ok': True})
 
     async def upload(self, request):
