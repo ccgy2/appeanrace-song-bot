@@ -65,8 +65,9 @@ class StudioAPI(unittest.IsolatedAsyncioTestCase):
     async def test_role_matrix_denies_direct_http_mutations(self):
         for role in ['player','user']:
             h=await self.account(role)
-            for method,path,body in [('POST','/api/songs',{'team':'팀',**song()}),('DELETE','/api/songs?team=팀&name=곡',None),('PUT','/api/events',{'team':'팀','key':'homerun','tracks':[]}),('POST','/api/events',{'team':'팀','label':'새 상황'}),('DELETE','/api/events?team=팀&key=homerun',None),('POST','/api/team',{'team':'팀'}),('PUT','/api/lineup',{'team':'팀','lineup':{}}),('GET','/api/backup',None),('GET','/api/users',None)]:
+            for method,path,body in [('POST','/api/songs',{'team':'팀',**song()}),('DELETE','/api/songs?team=팀&name=곡',None),('PUT','/api/events',{'team':'팀','key':'homerun','tracks':[]}),('POST','/api/events',{'team':'팀','label':'새 상황'}),('DELETE','/api/events?team=팀&key=homerun',None),('POST','/api/team',{'team':'팀'}),('GET','/api/backup',None),('GET','/api/users',None)]:
                 r=await self.client.request(method,path,json=body,headers=h);self.assertEqual(r.status,403,(role,method,path,await r.text()))
+            r=await self.client.put('/api/lineup',json={'team':'A팀','lineup':{}},headers=h);self.assertEqual(r.status,200 if role=='player' else 403)
             data=aiohttp.FormData();data.add_field('file',wav_bytes(),filename='no.wav')
             r=await self.client.post('/api/upload',data=data,headers=h);self.assertEqual(r.status,403)
             r=await self.client.get('/api/state',headers=h);self.assertEqual(r.status,200)

@@ -1,0 +1,69 @@
+{
+  "release": "lineup-sound-order-20261030-1",
+  "date_kst": "2026-10-30",
+  "source_attachment_overlap": {
+    "compared": 48,
+    "identical": 48
+  },
+  "audio_preservation": {
+    "files": 52,
+    "all_bytes_identical": true,
+    "utf8_paths_restored": [
+      "sounds/game_end/경기종료2.mp3",
+      "sounds/game_end/경기종료3-엘도라도.mp3",
+      "sounds/game_end/경기종료4-한화.mp3",
+      "sounds/game_end/경기종료5-엘지.mp3",
+      "sounds/game_end/마구마구.mp3",
+      "sounds/game_end/전력질주.mp3",
+      "sounds/game_end/스토브리그.mp3",
+      "sounds/game_end/아파트.mp3",
+      "sounds/game_end/치고달려라.mp3",
+      "sounds/lineup/한화라인업.mp3",
+      "sounds/start/기아시작.mp3",
+      "sounds/start/한화시작.mp3",
+      "sounds/start/시작.mp3",
+      "sounds/start/시작2.mp3",
+      "sounds/start/엘지시작.mp3"
+    ]
+  },
+  "connection_settings_preserved": true,
+  "static_ui_copies_identical": true,
+  "modified_files": [
+    "ACCOUNT_SETUP.md",
+    "README.md",
+    "bot_patch/webapp.py",
+    "permissions.py",
+    "release.py",
+    "static/app.js",
+    "static/index.html",
+    "static/style.css",
+    "static/sw.js",
+    "tests/test_studio_update.py",
+    "webapp.py",
+    "웹사이트/ACCOUNT_SETUP.md",
+    "웹사이트/README.md",
+    "웹사이트/static/app.js",
+    "웹사이트/static/index.html",
+    "웹사이트/static/style.css",
+    "웹사이트/static/sw.js"
+  ],
+  "added_files": [
+    "TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md",
+    "UPDATE_LINEUP_SOUND_ORDER_20261030.md",
+    "tests/test_lineup_permissions.py",
+    "웹사이트/tests/browser-fixture.cjs",
+    "웹사이트/tests/event-order.test.cjs",
+    "웹사이트/tests/lineup-permissions.test.cjs",
+    "웹사이트/tests/ui-regression.cjs"
+  ],
+  "checks": {
+    "frontend_lineup": 15,
+    "frontend_event_order": 23,
+    "existing_frontend_regression": 13,
+    "backend_lineup_root": 10,
+    "backend_lineup_variant": 10,
+    "existing_backend_permission": 3,
+    "browser_groups": 21
+  },
+  "production_deployed": false
+}
