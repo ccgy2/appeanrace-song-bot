@@ -51,6 +51,12 @@ const livePoller = createLivePoller({
 const roleNames = {admin:'관리자',registrar:'등장곡 등록/삭제자',player:'등장곡 재생자',user:'유저',pending:'승인 대기'};
 function canPlay() { return ['admin','registrar','player'].includes(currentUser?.role); }
 function canEditMusic() { return ['admin','registrar'].includes(currentUser?.role); }
+function canManageLineup() { return ['admin','registrar','player'].includes(currentUser?.role); }
+let lineupContext = null;
+function isCurrentLineupContext(snapshot = lineupContext) {
+  return Boolean(snapshot && csrf && state && snapshot.token === accessToken
+    && snapshot.team === selectedTeam && snapshot.bot === selectedBot && snapshot.guild === selectedGuild);
+}
 const categoryNames = {entrance:'등장곡', cheer:'응원가', situation:'상황별 노래'};
 function categorySongs(category = currentCategory) { return state?.library?.[category] || (category === 'entrance' ? state?.songs || [] : []); }
 function workspaceKey() { return 'appearance:workspace:v2:' + apiBase + ':' + (currentUser?.username || ''); }
@@ -185,6 +191,7 @@ function showLogin() {
   csrf = ''; state = null; currentUser = null; stateTicket++; previewTicket++; uploadTicket++;
   rememberToken(''); clearMedia();
   if (eventDialog.open) eventDialog.close(); eventDraft=null;
+  eventOrderEditing=false;eventOrderContext='';
   $('#app').hidden = true; $('#login-screen').hidden = false;
   $('#password').value = ''; if ($('#username')) $('#username').value = '';
   selectedTeam=''; selectedGuild=''; selectedBot='primary'; currentCategory='entrance';
@@ -546,10 +553,11 @@ function renderSongs() {
 }
 function renderLineup() {
   const grid=$('#lineup-grid'); grid.replaceChildren();
+  lineupContext={token:accessToken,team:selectedTeam,bot:selectedBot,guild:selectedGuild};
   for (let i=1;i<=9;i++) {
     const card=el('div',null,'lineup-slot'); card.classList.toggle('current',state.state.currentOrder===i);
     card.append(el('strong',String(i).padStart(2,'0')+'번'));
-    const select=el('select'); select.dataset.order=i; select.setAttribute('aria-label',`${i}번 타자`);
+    const select=el('select'); select.dataset.order=i; select.setAttribute('aria-label',`${i}번 타자`); select.disabled=!canManageLineup();
     const names=state.songs.map(s=>s.name), current=state.lineup[i] || '';
     if (current && !names.includes(current)) names.push(current);
     fillSelect(select,names.map(n=>({id:n,name:n})),current,'타자 선택'); card.append(select);
@@ -586,16 +594,108 @@ function eventTracks(event) {
 function eventModeName(mode){return {single:'단곡',random:'랜덤',sequence:'순서대로 1곡씩'}[mode] || '단곡';}
 function eventTrackKey(t){return t.type==='song'?JSON.stringify([t.category || 'situation',t.songName]):'asset:'+t.assetId;}
 function eventTrackLabel(t){return t.type==='song'?`[${categoryNames[t.category || 'situation']}] ${t.songName}`:(t.filename || '업로드 오디오');}
+// Card layout is a personal preference, separate from shared event-track playback order.
+// Keep deleted keys so restoring a situation also restores its remembered position.
+let eventOrderEditing=false, eventOrderContext='';
+function eventOrderStorageKey() {
+  return 'appearance:event-order:v1:'+JSON.stringify([apiBase || location.origin,currentUser?.username || '',selectedTeam]);
+}
+function uniqueEventKeys(keys) {
+  return [...new Set(keys.filter(key=>typeof key==='string' && key.length>0))];
+}
+function readEventOrder() {
+  try {
+    const raw=localStorage.getItem(eventOrderStorageKey());
+    if(raw===null)return {keys:[],error:''};
+    const saved=JSON.parse(raw);
+    if(saved?.version!==1 || !Array.isArray(saved.keys) || saved.keys.some(key=>typeof key!=='string' || !key.length))throw new Error('invalid order');
+    return {keys:uniqueEventKeys(saved.keys),error:''};
+  } catch {
+    return {keys:[],error:'저장된 순서를 읽지 못해 기본 순서로 표시합니다. 브라우저 저장 설정을 확인한 뒤 다시 정렬하세요.'};
+  }
+}
+function orderedEventKeys(savedKeys, events) {
+  return uniqueEventKeys([...savedKeys,...events.map(event=>event.key)]);
+}
+function moveVisibleEventKey(keys, visibleKeys, key, move) {
+  const from=visibleKeys.indexOf(key);
+  if(from<0)return keys.slice();
+  const destinations={top:0,up:Math.max(0,from-1),down:Math.min(visibleKeys.length-1,from+1),bottom:visibleKeys.length-1};
+  if(!Object.hasOwn(destinations,move))return keys.slice();
+  const reordered=visibleKeys.slice(), [moved]=reordered.splice(from,1);
+  reordered.splice(destinations[move],0,moved);
+  const visible=new Set(visibleKeys);let cursor=0;
+  // Filtering must never drop hidden cards or change their occupied positions.
+  return keys.map(item=>visible.has(item)?reordered[cursor++]:item);
+}
+function eventOrderReady() {
+  if(!canPlay())throw new Error('경기 사운드 정렬은 등장곡 재생자 이상 권한이 필요합니다.');
+  if(!state || stateLoads || !selectedTeam || state.team!==selectedTeam || eventOrderContext!==eventOrderStorageKey()
+    || (state.botTarget || 'primary')!==selectedBot || (state.guildId || '')!==selectedGuild) {
+    throw new Error('선택한 팀의 목록을 불러온 뒤 순서를 변경하세요.');
+  }
+}
+function focusMovedEvent(key, move) {
+  const card=$$('#events-grid .event-card').find(node=>node.dataset.eventKey===key);
+  if(!card)return;
+  const buttons=Array.from(card.querySelectorAll('[data-event-move]'));
+  const target=buttons.find(button=>button.dataset.eventMove===move && !button.disabled)
+    || buttons.find(button=>!button.disabled) || card;
+  target.focus({preventScroll:true});card.scrollIntoView({block:'nearest'});
+}
+function moveEventCard(key, move) {
+  eventOrderReady();
+  const events=state.events || [], byKey=new Map(events.map(event=>[event.key,event]));
+  const keys=orderedEventKeys(readEventOrder().keys,events);
+  const search=$('#event-search').value.trim().toLocaleLowerCase();
+  const visible=keys.filter(item=>byKey.has(item) && byKey.get(item).label.toLocaleLowerCase().includes(search));
+  const next=moveVisibleEventKey(keys,visible,key,move);
+  if(next.every((item,index)=>item===keys[index]))return;
+  try { localStorage.setItem(eventOrderStorageKey(),JSON.stringify({version:1,keys:next})); }
+  catch { throw new Error('순서를 저장하지 못했습니다. 브라우저 저장 공간과 개인정보 보호 설정을 확인하세요. 기존 순서는 유지했습니다.'); }
+  renderEvents();focusMovedEvent(key,move);
+  const position=next.filter(item=>byKey.has(item)).indexOf(key)+1;
+  toast(`“${byKey.get(key).label}”을 ${position}번째로 옮겼습니다. 이 브라우저에 순서를 저장했습니다.`);
+}
+$('#toggle-event-order').addEventListener('click',()=>run(null,()=>{
+  eventOrderReady();eventOrderEditing=!eventOrderEditing;renderEvents();
+}));
+$('#reset-event-order').addEventListener('click',()=>run(null,()=>{
+  eventOrderReady();
+  if(!confirm('이 팀의 내 화면 순서를 기본 순서로 되돌릴까요?'))return;
+  try { localStorage.removeItem(eventOrderStorageKey()); }
+  catch { throw new Error('기본 순서를 저장하지 못했습니다. 브라우저 저장 설정을 확인하세요. 기존 순서는 유지했습니다.'); }
+  renderEvents();$('#toggle-event-order').focus();toast('이 팀의 내 화면 순서를 기본 순서로 되돌렸습니다.');
+}));
+window.addEventListener('storage',event=>{
+  if(currentUser && state && (event.key===null || event.key===eventOrderStorageKey()))renderEvents();
+});
 function renderEvents() {
   const grid=$('#events-grid');grid.replaceChildren();if(!state)return;
+  const scope=eventOrderStorageKey();
+  if(eventOrderContext!==scope){eventOrderContext=scope;eventOrderEditing=false;}
+  if(!canPlay())eventOrderEditing=false;
+  const saved=readEventOrder(), allEvents=state.events || [];
+  const byKey=new Map(allEvents.map(event=>[event.key,event]));
+  const ordered=orderedEventKeys(saved.keys,allEvents).filter(key=>byKey.has(key)).map(key=>byKey.get(key));
   const search=$('#event-search').value.trim().toLocaleLowerCase();
-  const events=(state.events || []).filter(e=>e.label.toLocaleLowerCase().includes(search));
+  const events=ordered.filter(e=>e.label.toLocaleLowerCase().includes(search));
+  const toggle=$('#toggle-event-order');toggle.hidden=!canPlay();toggle.disabled=!allEvents.length;
+  toggle.textContent=eventOrderEditing?'순서 편집 완료':'카드 순서 편집';toggle.setAttribute('aria-pressed',String(eventOrderEditing));
+  $('#reset-event-order').hidden=!canPlay() || !eventOrderEditing;
+  $('#reset-event-order').disabled=!saved.error && !saved.keys.length;
+  $('#event-sort-status').textContent=saved.error || '내 화면 순서 · 이 브라우저에 계정·팀별로 자동 저장됩니다.';
+  $('#event-sort-status').classList.toggle('warn',!!saved.error);
+  $('#event-sort-help').hidden=!eventOrderEditing;
+  $('#event-sort-help').textContent=search
+    ?'검색 결과 안에서 순서를 바꿉니다. 검색에 나오지 않는 상황의 위치는 유지됩니다.'
+    :'자주 쓰는 상황을 ‘맨 위’로 올리거나 위·아래 버튼으로 옮기세요. 변경하면 자동 저장됩니다.';
   $('#event-count').textContent=`${events.length}개 상황`;
   const deleted=state.deletedEvents || [];
   $('#deleted-events-box').hidden=!canEditMusic() || !deleted.length;
   fillSelect($('#deleted-event-select'),deleted.map(e=>({id:e.key,name:e.label})),$('#deleted-event-select').value,'복원할 상황 선택');
-  for(const event of events){
-    const card=el('article',null,'card event-card');card.dataset.eventKey=event.key;
+  for(const [index,event] of events.entries()){
+    const card=el('article',null,'card event-card');card.dataset.eventKey=event.key;card.tabIndex=-1;
     const heading=el('div',null,'event-card-heading');
     heading.append(el('h3',event.label),el('span',event.customEvent?'직접 추가':'기본 상황','badge'));
     card.append(heading);
@@ -605,14 +705,30 @@ function renderEvents() {
     const actions=el('div',null,'event-card-actions');
     if(canPlay())actions.append(bindButton('▶ 상황 재생','soft',()=>control('event',{key:event.key})));
     if(canEditMusic()){
-      actions.append(bindButton('곡 · 순서 편집','ghost',()=>openEventEditor(event)));
+      actions.append(bindButton('연결 곡 편집','ghost',()=>openEventEditor(event)));
       actions.append(bindButton('상황 삭제','ghost delete',async()=>{
         const team=selectedTeam;
         if(!confirm(`“${event.label}” 상황을 삭제할까요? 이 팀의 목록에서 사라지고 재생할 수 없게 됩니다. 원본 곡은 보관되며 나중에 복원할 수 있습니다.`))return;
         await api('/api/events?'+new URLSearchParams({team,key:event.key}),'DELETE');await loadState();toast('상황을 삭제했습니다. 아래 복원 메뉴에서 되돌릴 수 있습니다.');
       }));
     }
-    card.append(actions);grid.append(card);
+    card.append(actions);
+    if(eventOrderEditing){
+      const arrangement=el('div',null,'event-reorder-actions');arrangement.setAttribute('role','group');arrangement.setAttribute('aria-label',`${event.label} 카드 순서`);
+      arrangement.append(el('span',`${ordered.indexOf(event)+1}번째`,'event-position'));
+      for(const [move,label,disabled] of [
+        ['top','⇈ 맨 위',index===0],['up','↑ 위로',index===0],
+        ['down','↓ 아래로',index===events.length-1],['bottom','⇊ 맨 아래',index===events.length-1],
+      ]){
+        const button=bindButton(label,'ghost',()=>moveEventCard(event.key,move));
+        button.dataset.eventMove=move;button.disabled=disabled;
+        const direction={top:'맨 위로',up:'위로',down:'아래로',bottom:'맨 아래로'}[move];
+        button.setAttribute('aria-label',`${event.label} ${search?'검색 결과에서 ':''}${direction} 이동`);
+        arrangement.append(button);
+      }
+      card.append(arrangement);
+    }
+    grid.append(card);
   }
   if(!events.length)grid.append(el('p',search?'검색 결과가 없습니다.':'경기 상황이 없습니다. 새 상황을 추가하거나 삭제한 상황을 복원하세요.','notice'));
 }
@@ -815,8 +931,9 @@ function applyRole() {
   $('#deleted-events-box').hidden=!canEditMusic() || !(state?.deletedEvents?.length);
   const editor = $('.song-editor'); if(editor)editor.hidden=!canEditMusic();
   $('.library-grid')?.classList.toggle('read-only',!canEditMusic());
-  for(const sel of ['#new-team','#activate-team','#save-lineup','#export-backup','#export-audio-backup']) {const x=$(sel);if(x)x.hidden=!admin;}
-  $$('#lineup-grid select').forEach(x=>x.disabled=!admin);
+  for(const sel of ['#new-team','#activate-team','#export-backup','#export-audio-backup']) {const x=$(sel);if(x)x.hidden=!admin;}
+  $('#save-lineup').hidden=!canManageLineup();
+  $$('#lineup-grid select').forEach(x=>x.disabled=!canManageLineup());
   $('#role-notice').hidden=currentUser?.role!=='user';
   if(state)drawLive(state);
 }
@@ -893,7 +1010,17 @@ $('#stop').addEventListener('click',()=>run($('#stop'),()=>control('stop',{},'�
 $('#next-player').addEventListener('click',()=>run($('#next-player'),()=>control('next')));
 $('#volume').addEventListener('input',()=>{$('#volume-value').textContent=$('#volume').value+'%';});
 $('#volume').addEventListener('change',()=>run(null,()=>control('volume',{value:Number($('#volume').value)})));
-$('#save-lineup').addEventListener('click',()=>run($('#save-lineup'),async()=>{const lineup={};$$('#lineup-grid select').forEach(s=>{lineup[s.dataset.order]=s.value;});await api('/api/lineup','PUT',{team:selectedTeam,lineup});await loadState();toast('타순을 저장했습니다.');}));
+$('#save-lineup').addEventListener('click',()=>run($('#save-lineup'),async()=>{
+  if(!canManageLineup())throw new Error('타순 관리는 등장곡 등록/삭제자 또는 재생자 이상 권한이 필요합니다.');
+  if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
+  if(stateLoads || !isCurrentLineupContext())throw new Error('선택한 팀의 타순을 불러온 뒤 다시 저장하세요.');
+  const snapshot={...lineupContext}, lineup={};
+  $$('#lineup-grid select').forEach(s=>{lineup[s.dataset.order]=s.value;});
+  await api('/api/lineup','PUT',{team:snapshot.team,lineup});
+  if(!isCurrentLineupContext(snapshot))return;
+  await loadState();
+  if(isCurrentLineupContext(snapshot))toast('타순을 저장했습니다.');
+}));
 $('#event-create-form').addEventListener('submit',e=>{e.preventDefault();run(e.submitter,async()=>{
   if(!canEditMusic())throw new Error('등록/삭제자 이상 권한이 필요합니다.');
   if(!selectedTeam)throw new Error('팀을 먼저 선택하세요.');
