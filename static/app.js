@@ -632,17 +632,56 @@ async function selectSongFile(file,resume) {
 }
 $('#cancel-song-upload').addEventListener('click',()=>{cancelUploadJobs('song');discardPendingSongUpload();});
 $('#retry-song-upload').addEventListener('click',()=>{const pending=pendingSongUpload;if(pending)void selectSongFile(pending.file,pending);});
+function playbackPresentation(s,chosenTeam='') {
+  const voice=s.voice || {},playing=s.nowPlaying || {};
+  const team=String(s.team || chosenTeam || ''),playingTeam=String(playing.team || '');
+  const active=['playing','preparing'].includes(playing.status) || voice.playing===true || voice.paused===true;
+  const differentTeam=active && !!team && !!playingTeam && team!==playingTeam;
+  const liveMaster=Number.isFinite(playing.masterVolumePercent) && playing.masterVolumePercent>=0 && playing.masterVolumePercent<=100?playing.masterVolumePercent:null;
+  const selectedVolume=Number.isFinite(s.state?.volume)?Math.max(0,Math.min(1,s.state.volume)):0.5;
+  const volumePercent=active && playingTeam===team && liveMaster!==null?Math.round(liveMaster):Math.round(selectedVolume*100);
+  const masterMuted=active && (liveMaster===0 || (playingTeam===team && liveMaster===null && selectedVolume===0));
+  const songMuted=active && playing.songVolumePercent===0;
+  const warnings=[];
+  if(voice.serverMuted)warnings.push('Discord 서버 음소거');
+  if(voice.selfMuted)warnings.push('봇 자체 음소거');
+  if(voice.stageAudience)warnings.push('스테이지 청중 상태 · 발언자로 전환해주세요');
+  if(masterMuted)warnings.push('재생 팀 전체 볼륨 0%');
+  if(songMuted)warnings.push('곡 자체 볼륨 0%');
+  let headline;
+  if(playing.error)headline=playing.error;
+  else if(!voice.connected)headline=playing.status==='preparing'?'오디오 준비 중 · 통화방 연결 대기':active?'통화방 연결 끊김 · 재생 상태를 확인하세요':'통화방 연결 안 됨';
+  else if(voice.paused)headline='일시정지';
+  else if(warnings.length)headline='소리가 나오지 않는 설정';
+  else if(playing.status==='preparing')headline='오디오 준비 중';
+  else if(voice.playing)headline='봇 재생 중';
+  else if(playing.status==='playing')headline='재생 확인 필요 · 봇의 재생이 멈춰 있습니다';
+  else headline=statusNames[playing.status] || '재생 대기 중';
+  const location=[s.botLabel || '선택한 봇',voice.connected && voice.channelName?voice.channelName:'',active && playingTeam?'재생 팀 '+playingTeam:''].filter(Boolean).join(' / ');
+  const status=[headline,...warnings,location];
+  if(differentTeam)status.push(`볼륨 조절은 선택한 ${team}에 적용됩니다`);
+  const voiceWarnings=warnings.filter(message=>!message.includes('볼륨'));
+  const voiceDetail=!voice.connected?'통화방을 선택하고 연결하세요.':voiceWarnings.length?voiceWarnings.join(' · ')
+    :`${voice.stage?'스테이지 발언자':'음성 채널'} 연결됨${Number.isFinite(voice.latencyMs)?' · '+voice.latencyMs+'ms':''}`;
+  return {statusText:status.join(' · '),voiceDetail,volumePercent,
+    volumeCaption:differentTeam?'선택팀 볼륨':'팀 볼륨',
+    volumeLabel:`${team || '선택한 팀'} 볼륨${differentTeam?' · 현재 재생 팀 '+playingTeam+'의 볼륨은 바뀌지 않습니다':''}`,
+  };
+}
 function drawLive(s) {
   const voice = s.voice;
+  const playback=playbackPresentation(s,selectedTeam);
   $('#sidebar-dot').classList.toggle('online', s.ready);
   $('#sidebar-status').textContent = s.ready ? `${s.botLabel || '선택한 봇'} 연결됨` : `${s.botLabel || '선택한 봇'} 미연결`;
   if ($('#voice-bot-label')) $('#voice-bot-label').textContent = s.botLabel || (selectedBot==='secondary'?'백팀 봇':'청팀 봇');
   const voiceTitle = $('#voice-title'); if (voiceTitle) voiceTitle.textContent = voice?.connected ? `${voice.channelName} 연결됨` : '통화방 연결';
-  $('#voice-detail').textContent = voice?.connected ? (voice.stageAudience ? '스테이지 청중 상태 · 관리자가 발언자로 전환한 후 다시 재생하세요.' : voice.serverMuted ? '서버 음소거를 해제해주세요.' : `${voice.stage?'스테이지 발언자':'음성 연결'} 정상${voice.latencyMs !== null ? ' · ' + voice.latencyMs + 'ms' : ''}`) : '통화방을 선택하고 연결하세요.';
+  $('#voice-detail').textContent=playback.voiceDetail;
   $('#voice-error').hidden = !voice?.error; $('#voice-error').textContent = voice?.error || '';
   $('#playing-title').textContent = s.nowPlaying?.title || '재생 대기 중';
-  $('#playing-status').textContent = s.nowPlaying?.error || statusNames[s.nowPlaying?.status] || 'Discord 통화방에서 재생됩니다';
-  if (document.activeElement !== $('#volume')) { $('#volume').value = Math.round(s.state.volume * 100); $('#volume-value').textContent = $('#volume').value + '%'; }
+  const status=$('#playing-status');if(status.textContent!==playback.statusText)status.textContent=playback.statusText;
+  const volume=$('#volume');volume.setAttribute('aria-label',playback.volumeLabel);volume.title=playback.volumeLabel;
+  const caption=$('#volume-caption');if(caption)caption.textContent=playback.volumeCaption;
+  if (document.activeElement !== volume) {volume.value=playback.volumePercent;$('#volume-value').textContent=volume.value+'%';}
   drawAutoEntrance(s.autoEntrance);
   const off = !s.ready || !canPlay();
   for (const id of ['connect','disconnect','next-player','stop','activate-team']) $('#' + id).disabled = off;
