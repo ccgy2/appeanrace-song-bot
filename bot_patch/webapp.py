@@ -26,6 +26,7 @@ from event_tracks import event_tracks, MAX_EVENT_TRACKS
 from resource_usage import ResourceMeter
 from release import RELEASE
 from audio_runtime import audio_profile_info
+from upload_sessions import UploadSessions, CHUNK_BYTES
 
 log = logging.getLogger(__name__)
 COOKIE = 'appearance_session'
@@ -40,6 +41,22 @@ AUTH_MAX_PENDING_HASHES = 16
 AUTH_MAX_REQUESTS = 32
 AUTH_HASH_CONCURRENCY = 2
 SIGNUP_ATTEMPTS_PER_WINDOW = 60
+MEDIA_TICKET_TTL = 60 * 60
+MEDIA_MAX_TICKETS = 1024
+LEGACY_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+class BoundedLegacyPart:
+    """Keep old small multipart clients working without a giant single request."""
+    def __init__(self, part):
+        self.part, self.filename, self.received = part, part.filename, 0
+
+    async def read_chunk(self, size=65536):
+        chunk = await self.part.read_chunk(size=size)
+        self.received += len(chunk)
+        if self.received > LEGACY_UPLOAD_BYTES:
+            raise ValueError('64MB가 넘는 파일은 새 웹사이트의 나눠 올리기로 등록하세요. 웹사이트를 새로고침하세요.')
+        return chunk
 
 def password_hash(password: str, salt: bytes | None = None) -> str:
     salt = salt or os.urandom(16)
@@ -94,6 +111,8 @@ class WebPanel:
         self.s = bot.settings
         self.store = bot.store
         self.assets = bot.assets
+        self.uploads = UploadSessions(self.assets)
+        self.media_tickets: dict[str, dict] = {}
         self.sessions: dict[str, dict] = {}
         self.attempts: dict[str, deque] = defaultdict(deque)
         self.signup_attempts: dict[str, deque] = defaultdict(deque)
@@ -111,7 +130,10 @@ class WebPanel:
         self.state_cache_ttl = 300.0
         self.state_cache_limit = 8
         self.state_cache_lock = asyncio.Lock()
-        self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=(self.s.max_upload_mb + 1) * 1024 * 1024)
+        # JSON is independently limited to 64 KiB by body(); chunk handlers count
+        # every received byte. Never raise the global body limit to ten GiB.
+        self.app = web.Application(middlewares=[self.cors, self.security], client_max_size=LEGACY_UPLOAD_BYTES + 1024 * 1024)
+        self.app.on_cleanup.append(self._cleanup_uploads)
         routes = [
             web.get('/healthz', self.health),
             web.get('/api/connection', self.connection),
@@ -131,6 +153,12 @@ class WebPanel:
             web.delete('/api/songs', self.delete_song),
             web.put('/api/lineup', self.save_lineup),
             web.post('/api/upload', self.upload),
+            web.post('/api/uploads', self.start_upload),
+            web.get('/api/uploads/{upload}', self.upload_status),
+            web.put('/api/uploads/{upload}', self.upload_chunk),
+            web.post('/api/uploads/{upload}/complete', self.finish_upload),
+            web.delete('/api/uploads/{upload}', self.cancel_upload),
+            web.post('/api/media/{asset}/ticket', self.media_ticket),
             web.get('/api/media/{asset}', self.media),
             web.post('/api/events', self.create_event),
             web.put('/api/events', self.event),
@@ -138,6 +166,7 @@ class WebPanel:
             web.post('/api/control', self.control),
             web.get('/api/diagnostics', self.diagnostics),
             web.get('/api/export', self.export),
+            web.post('/api/backup/ticket', self.backup_ticket),
             web.get('/api/backup', self.backup),
         ]
         if self.s.serve_web_static:
@@ -200,8 +229,11 @@ class WebPanel:
         try:
             self._cleanup_auth()
             if request.path.startswith('/api/') and request.path not in {'/api/login', '/api/signup', '/api/connection'}:
+                media_session = self._media_session(request)
                 authorization = request.headers.get('Authorization', '')
-                if authorization:
+                if media_session is not None:
+                    key, mode = media_session
+                elif authorization:
                     parts = authorization.split()
                     if len(parts) != 2 or parts[0].lower() != 'bearer':
                         raise web.HTTPUnauthorized(text='로그인 토큰이 올바르지 않습니다.')
@@ -215,7 +247,7 @@ class WebPanel:
                 if sess.get('mode', 'cookie') != mode:
                     raise web.HTTPUnauthorized(text='로그인 방식이 맞지 않습니다. 다시 로그인하세요.')
                 # A browser token obtained by one website cannot be used by another origin.
-                if mode == 'bearer' and sess.get('origin') != self.request_origin(request):
+                if media_session is None and mode == 'bearer' and sess.get('origin') != self.request_origin(request):
                     raise web.HTTPForbidden(text='로그인한 웹사이트에서 다시 시도하세요.')
                 request['session'], request['session_key'] = sess, key
                 role = sess.get('role', 'pending')
@@ -237,6 +269,10 @@ class WebPanel:
             resp = response({'error': exc.text if exc.status in {401, 403, 429} else exc.reason}, exc.status)
             if exc.status == 429 and 'Retry-After' in exc.headers:
                 resp.headers['Retry-After'] = exc.headers['Retry-After']
+        except PermissionError:
+            resp = response({'error': '이 업로드에 접근할 수 없습니다.'}, 403)
+        except FileNotFoundError:
+            resp = response({'error': '업로드가 만료되었거나 없습니다. 파일을 다시 선택하세요.'}, 404)
         except (ValueError, KeyError, TypeError) as exc:
             resp = response({'error': str(exc)[:400]}, 400)
         except Exception as exc:
@@ -260,6 +296,29 @@ class WebPanel:
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         })
         return resp
+
+    def _media_session(self, request):
+        """An opaque, asset-only grant allows native Range media without a Blob."""
+        token = request.query.get('ticket')
+        if token is None:
+            return None
+        match = re.fullmatch(r'/api/media/([a-f0-9]{32})', request.path)
+        resource = match.group(1) if match else ('backup' if request.path == '/api/backup' else None)
+        grant = self.media_tickets.get(token)
+        if (request.method not in {'GET', 'HEAD'} or not resource or not grant
+                or grant['asset'] != resource
+                or grant['download'] != (request.query.get('download') == '1')
+                or grant['expires'] <= time.monotonic()):
+            raise web.HTTPUnauthorized(text='미디어 링크가 만료됐습니다. 다시 듣기 또는 다운로드를 누르세요.')
+        sess = self.sessions.get(grant['session'])
+        if not sess or sess['expires'] <= time.monotonic() or not allowed(sess.get('role'), 'read'):
+            self.media_tickets.pop(token, None)
+            raise web.HTTPUnauthorized(text='다시 로그인한 뒤 미디어를 열어주세요.')
+        return grant['session'], sess.get('mode', 'cookie')
+
+    async def _cleanup_uploads(self, app):
+        await self.uploads.close()
+        self.media_tickets.clear()
 
     async def index(self, request):
         return web.FileResponse(ROOT / 'static' / 'index.html')
@@ -331,7 +390,7 @@ class WebPanel:
         return response({'service': 'appearance-song-bot', 'apiVersion': 2,
                          'authMode': 'bearer', 'web': 'ok', 'build': 'song-volume-20260926-1', 'release': RELEASE,
                          'capabilities': ['song-volume', 'event-track-volume', 'library-categories', 'atomic-rename', 'storage-check',
-                                          'roles-v3', 'global-autoplay', 'stage-voice', 'event-all-categories', 'event-delete-restore', 'original-name-backup', 'pwa', 'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite'],
+                                          'roles-v3', 'global-autoplay', 'stage-voice', 'event-all-categories', 'event-delete-restore', 'original-name-backup', 'pwa', 'dual-bot', 'per-bot-team', 'event-play-modes', 'separate-voice-channels', 'railway-sqlite', 'resumable-uploads-v1', 'mp4-audio', 'media-tickets'],
                          'discordReady': self.bot.is_ready(), 'secondaryReady': any(
                              x['id'] == 'secondary' and x['ready'] for x in bots),
                          'bots': bots, 'webOnly': self.s.web_only})
@@ -352,6 +411,9 @@ class WebPanel:
         for key, session in list(self.sessions.items()):
             if session['expires'] <= now:
                 self.sessions.pop(key, None)
+        for key, grant in list(self.media_tickets.items()):
+            if grant['expires'] <= now or grant['session'] not in self.sessions:
+                self.media_tickets.pop(key, None)
         for buckets in (self.attempts, self.signup_attempts):
             for ip, window in list(buckets.items()):
                 while window and now - window[0] > AUTH_WINDOW_SECONDS:
@@ -554,6 +616,7 @@ class WebPanel:
                 else:
                     song['filename'] = meta['name']
                     song['fileDuration'] = meta['duration']
+                    song['assetBytes'] = meta['bytes']
         events = snapshot['events']
         return {
             'webOnly': self.s.web_only, 'serveWebStatic': self.s.serve_web_static,
@@ -573,6 +636,10 @@ class WebPanel:
             'songVolumeEnabled': True,
             'maxEventTracks': MAX_EVENT_TRACKS,
             'maxUploadMb': self.s.max_upload_mb,
+            'maxStorageMb': self.s.max_storage_mb,
+            'uploadChunkBytes': CHUNK_BYTES,
+            'resumableUploads': True,
+            'mediaTickets': True,
         }
 
     async def _cached_state(self, target: str, guild, requested_team: str) -> dict:
@@ -798,12 +865,83 @@ class WebPanel:
     async def upload(self, request):
         if request.content_type != 'multipart/form-data':
             raise ValueError('파일 업로드 형식이 올바르지 않습니다.')
+        if request.content_length and request.content_length > LEGACY_UPLOAD_BYTES:
+            raise ValueError('64MB가 넘는 파일은 새 웹사이트의 나눠 올리기로 등록하세요. 웹사이트를 새로고침하세요.')
         reader = await request.multipart()
         part = await reader.next()
         if part is None or part.name != 'file' or not part.filename:
             raise ValueError('오디오 파일을 선택하세요.')
-        result = await self.assets.upload(part)
+        result = await self.assets.upload(BoundedLegacyPart(part))
         return response(result)
+
+    async def start_upload(self, request):
+        data = await body(request)
+        result = await self.uploads.start(request['session']['username'], data.get('filename'), data.get('size'), data.get('requestId'))
+        return response(result, 201)
+
+    async def upload_status(self, request):
+        result = await self.uploads.status(request['session']['username'], request.match_info['upload'])
+        if result.get('status') == 'complete':
+            self.state_cache.clear()
+        return response(result)
+
+    async def upload_chunk(self, request):
+        if request.content_type != 'application/octet-stream' or request.headers.get('Content-Encoding'):
+            raise ValueError('압축하지 않은 파일 조각을 보내세요.')
+        offset = request.query.get('offset', '')
+        if not re.fullmatch(r'0|[1-9][0-9]{0,15}', offset):
+            raise ValueError('업로드 위치가 올바르지 않습니다.')
+        if request.content_length is not None and not 0 < request.content_length <= CHUNK_BYTES:
+            raise ValueError('파일 조각은 4MB 이하로 보내세요.')
+        result = await self.uploads.append(request['session']['username'], request.match_info['upload'],
+                                           int(offset), request.content.iter_chunked(64 * 1024))
+        return response(result)
+
+    async def finish_upload(self, request):
+        await body(request)
+        result = await self.uploads.finish(request['session']['username'], request.match_info['upload'])
+        if result.get('status') == 'complete':
+            self.state_cache.clear()
+        return response(result, 202 if result.get('status') == 'processing' else 200)
+
+    async def cancel_upload(self, request):
+        await self.uploads.cancel(request['session']['username'], request.match_info['upload'])
+        return response({'ok': True})
+
+    async def media_ticket(self, request):
+        data = await body(request)
+        download = data.get('download', False)
+        if not isinstance(download, bool):
+            raise ValueError('다운로드 설정은 true 또는 false여야 합니다.')
+        asset_id = request.match_info['asset']
+        meta = await asyncio.to_thread(self.assets.get, asset_id)
+        token, expires = self._issue_media_ticket(request, asset_id, download)
+        return response({'url': f'/api/media/{asset_id}?ticket={token}' + ('&download=1' if download else ''),
+                         'bytes': meta['bytes'], 'duration': meta['duration'], 'name': meta['name'],
+                         'expiresIn': expires})
+
+    def _issue_media_ticket(self, request, asset_id, download):
+        session_key = request['session_key']
+        now = time.monotonic()
+        self._cleanup_auth(force=True)
+        token = next((key for key, grant in self.media_tickets.items()
+                      if grant['session'] == session_key and grant['asset'] == asset_id
+                      and grant['download'] == download and grant['expires'] > now + 60), None)
+        if token is None:
+            if len(self.media_tickets) >= MEDIA_MAX_TICKETS:
+                raise web.HTTPTooManyRequests(text='열린 미디어가 많습니다. 잠시 후 다시 시도하세요.')
+            token = secrets.token_urlsafe(32)
+            self.media_tickets[token] = {'session': session_key, 'asset': asset_id, 'download': download,
+                                         'expires': min(now + MEDIA_TICKET_TTL, request['session']['expires'])}
+        return token, max(0, int(self.media_tickets[token]['expires'] - now))
+
+    async def backup_ticket(self, request):
+        await body(request)
+        if self.backup_lock.locked():
+            raise web.HTTPTooManyRequests(text='백업을 생성 중입니다. 잠시 뒤 다시 시도하세요.')
+        await self._check_backup_space()
+        token, expires = self._issue_media_ticket(request, 'backup', True)
+        return response({'url': f'/api/backup?ticket={token}&download=1', 'expiresIn': expires})
 
     async def media(self, request):
         meta = self.assets.get(request.match_info['asset'])
@@ -994,10 +1132,18 @@ class WebPanel:
         resp.headers['Content-Disposition'] = 'attachment; filename="song-metadata-backup.json"'
         return resp
 
+    async def _check_backup_space(self):
+        def available():
+            total = sum(p.stat().st_size for p in self.assets.root.iterdir() if p.is_file())
+            return shutil.disk_usage(tempfile.gettempdir()).free > total + 64 * 1024 * 1024
+        if not await asyncio.to_thread(available):
+            raise ValueError('백업 ZIP을 만들 임시 공간이 부족합니다. 곡별 원본 다운로드와 설정 백업을 이용하거나 서버 공간을 확보하세요.')
+
     async def backup(self, request):
         if self.backup_lock.locked():
             raise web.HTTPTooManyRequests(text='백업을 생성 중입니다. 잠시 뒤 다시 시도하세요.')
         async with self.backup_lock, self.assets.lock:
+            await self._check_backup_space()
             metadata = await self.store.export()
             handle = tempfile.TemporaryFile(mode='w+b')
             task = asyncio.create_task(asyncio.to_thread(write_music_backup, handle, self.assets, metadata))

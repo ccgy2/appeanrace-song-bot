@@ -86,8 +86,8 @@ class Settings:
     secure_cookie: bool = False
     web_only: bool = False
     idle_seconds: int = 300
-    max_upload_mb: int = 25
-    max_storage_mb: int = 1024
+    max_upload_mb: int = 10240
+    max_storage_mb: int = 20480
     ffmpeg: str = 'ffmpeg'
     ffprobe: str = 'ffprobe'
     cookies_path: str = ''
@@ -173,8 +173,8 @@ class Settings:
             secure_cookie=flag('WEB_COOKIE_SECURE', url.startswith('https://')),
             web_only=flag('WEB_ONLY'),
             idle_seconds=max(10, int(os.getenv('VOICE_IDLE_SECONDS', '300'))),
-            max_upload_mb=max(1, int(os.getenv('MAX_UPLOAD_MB', '25'))),
-            max_storage_mb=max(1, int(os.getenv('MAX_STORAGE_MB', '1024'))),
+            max_upload_mb=max(1, min(10240, int(os.getenv('MAX_UPLOAD_MB', '10240')))),
+            max_storage_mb=max(1, int(os.getenv('MAX_STORAGE_MB', '20480'))),
             ffmpeg=os.getenv('FFMPEG_PATH', 'ffmpeg'),
             ffprobe=os.getenv('FFPROBE_PATH', 'ffprobe'),
             cookies_path=os.getenv('YTDLP_COOKIES_PATH', '').strip(),
