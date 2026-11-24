@@ -4,7 +4,7 @@ import math
 import re
 from urllib.parse import parse_qs, urlparse
 
-AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus', '.webm'}
+AUDIO_EXTENSIONS = {'.mp3', '.wav', '.ogg', '.m4a', '.flac', '.aac', '.opus', '.webm', '.mp4'}
 EVENTS = {
     'lineup': '라인업 송', 'homerun': '홈런', 'homerun2': '홈런 2',
     'strikeout': '삼진', '4ball': '볼넷', 'fullcount': '풀카운트',

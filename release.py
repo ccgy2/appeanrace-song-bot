@@ -1,2 +1,2 @@
 """Public release identifier; no deployment credentials or environment data."""
-RELEASE = 'lineup-sound-order-20261030-1'
+RELEASE = 'large-upload-mp4-20261124-1'

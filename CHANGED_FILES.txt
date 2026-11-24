@@ -1,31 +1,49 @@
-lineup-sound-order-20261030-1
+large-upload-mp4-20261124-1
 
-Modified code and documentation:
+10GB + MP4 등록 / 기존 타순 권한 + 경기 사운드 정렬을 포함한 변경 파일 묶음입니다.
+기존 저장소의 같은 경로에 덮어쓰세요. 새 파일 upload_sessions.py도 반드시 추가하세요.
+Railway Variables: MAX_UPLOAD_MB=10240, MAX_STORAGE_MB=20480. 실제 Volume 여유 공간도 필요합니다.
+적용 안내: UPDATE_UPLOAD_10GB_MP4_20261124.md
+검증 결과: TEST_REPORT_UPLOAD_10GB_MP4_20261124.md
+
+총 40개 파일:
+.env.example
 ACCOUNT_SETUP.md
+CHANGED_FILES.txt
 README.md
+TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md
+TEST_REPORT_UPLOAD_10GB_MP4_20261124.md
+UPDATE_LINEUP_SOUND_ORDER_20261030.md
+UPDATE_UPLOAD_10GB_MP4_20261124.md
+assets.py
+bot_patch/config.py
 bot_patch/webapp.py
+config.py
 permissions.py
+player.py
 release.py
 static/app.js
 static/index.html
 static/style.css
 static/sw.js
+tests/package-verification-20261030.json
+tests/package-verification-20261124.json
+tests/test_large_upload_api.py
+tests/test_lineup_permissions.py
+tests/test_resumable_frontend.cjs
 tests/test_studio_update.py
+tests/test_upload_sessions.py
+upload_sessions.py
+validation.py
 webapp.py
 웹사이트/ACCOUNT_SETUP.md
 웹사이트/README.md
+웹사이트/firebase.json
 웹사이트/static/app.js
 웹사이트/static/index.html
 웹사이트/static/style.css
 웹사이트/static/sw.js
-
-Added tests and guides:
-TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md
-UPDATE_LINEUP_SOUND_ORDER_20261030.md
-tests/test_lineup_permissions.py
 웹사이트/tests/browser-fixture.cjs
 웹사이트/tests/event-order.test.cjs
 웹사이트/tests/lineup-permissions.test.cjs
 웹사이트/tests/ui-regression.cjs
-tests/package-verification-20261030.json
-CHANGED_FILES.txt

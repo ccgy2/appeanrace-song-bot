@@ -20,10 +20,11 @@ def allowed(role, capability):
 
 def required_capability(path, method):
     if path.startswith('/api/users'): return 'users'
-    if path in {'/api/export', '/api/backup'}: return 'backup'
+    if path in {'/api/export', '/api/backup'} or path.startswith('/api/backup/'): return 'backup'
     if path == '/api/team': return 'teams'
     if path == '/api/lineup': return 'lineup'
     if path in {'/api/songs', '/api/upload'}: return 'music'
+    if path == '/api/uploads' or path.startswith('/api/uploads/'): return 'music'
     if path == '/api/events': return 'events'
     if path == '/api/playback-settings' and method not in {'GET', 'HEAD'}: return 'autoplay'
     if path == '/api/control': return 'play'
