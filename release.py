@@ -1,2 +1,2 @@
 """Public release identifier; no deployment credentials or environment data."""
-RELEASE = 'playback-audio-fix-20261124-2'
+RELEASE = 'voice-dependencies-fix-20261124-3'

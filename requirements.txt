@@ -1,4 +1,7 @@
 discord.py[voice]==2.7.1
+# discord.py 2.7.1 uses davey's pre-0.2 key-transition API.
+# Keep this pair compatible when a fresh Railway image installs dependencies.
+davey==0.1.7
 python-dotenv>=1.0.1,<2
 firebase-admin>=6.5.0,<8
 aiohttp>=3.12.14,<4
