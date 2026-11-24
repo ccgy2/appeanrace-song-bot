@@ -57,3 +57,6 @@ body{padding-top:env(safe-area-inset-top)}.event-editor-footer{position:sticky;b
 .event-reorder-actions button{min-height:44px;min-width:48px;flex:1 1 auto;padding:8px;margin:0;font-size:12px;white-space:normal}
 .event-reorder-actions button:disabled{opacity:.4;cursor:default}
 @media(max-width:640px){.event-toolbar-actions{justify-content:flex-start}.event-toolbar-actions .badge{margin-right:auto}.event-toolbar .search-label{width:100%}.event-toolbar input{width:100%}.event-reorder-actions button{flex-basis:calc(50% - 6px)}}
+
+/* Resumable uploads: readable byte progress and reachable cancel/retry controls. */
+.upload-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.upload-actions button{min-height:44px;margin:0}.upload-status,#event-upload-status{white-space:pre-line;overflow-wrap:anywhere;line-height:1.7}#upload-progress,#event-upload-progress{width:100%;accent-color:#a8f5d7}#upload-preview{max-width:100%;width:100%}#upload-limit{line-height:1.7;white-space:normal}@media(max-width:520px){.upload-actions button{flex:1;white-space:normal;min-width:130px}.dropzone strong{font-size:14px;line-height:1.6}}

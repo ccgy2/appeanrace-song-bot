@@ -177,8 +177,11 @@ function rememberToken(token) {
 function releaseAudio(audio) {
   if (!audio) return;
   audio.pause(); audio.removeAttribute('src');
+  audio.onloadedmetadata = null; audio.ontimeupdate = null;audio.onerror=null;
+  audio.load?.();
   const previous = mediaUrls.get(audio);
-  if (previous) { URL.revokeObjectURL(previous); mediaUrls.delete(audio); }
+  if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+  mediaUrls.delete(audio);
 }
 function clearMedia() {
   privateMediaCache.clear();
@@ -188,6 +191,7 @@ function clearMedia() {
 }
 function showLogin() {
   livePoller.stop();
+  cancelUploadJobs();discardPendingSongUpload();discardEventUploadDraft(eventDraft);
   csrf = ''; state = null; currentUser = null; stateTicket++; previewTicket++; uploadTicket++;
   rememberToken(''); clearMedia();
   if (eventDialog.open) eventDialog.close(); eventDraft=null;
@@ -263,30 +267,67 @@ async function checkConnection() {
     return false;
   }
 }
-async function attachMedia(audio, id) {
-  // <audio src> cannot attach Authorization headers. Fetch privately, then use a blob URL.
-  const session = mediaScope(), blob = await privateMediaBlob(id);
+const SMALL_MEDIA_BYTES = 32 * 1024 * 1024;
+function checkedDownloadTicketUrl(path, relative) {
+  if(typeof relative!=='string' || !relative.startsWith('/api/'))throw new Error('미디어 주소가 올바르지 않습니다.');
+  const base=new URL(apiBase || location.origin), url=new URL(relative,base);
+  if(url.origin!==base.origin || url.pathname!==path || url.username || url.password || url.hash
+    || !url.searchParams.get('ticket') || [...url.searchParams.keys()].some(key=>!['ticket','download'].includes(key))) {
+    throw new Error('미디어 주소가 올바르지 않습니다.');
+  }
+  return url.href;
+}
+function checkedMediaTicketUrl(id, relative) { return checkedDownloadTicketUrl('/api/media/'+id,relative); }
+async function privateMediaSource(id, bytes, download=false) {
+  if(!/^[a-f0-9]{32}$/.test(String(id)))throw new Error('잘못된 오디오 파일 ID입니다.');
+  const session=mediaScope();
+  if(!session)throw new Error('로그인한 뒤 다시 시도하세요.');
+  // Unknown sizes must use a ticket: never discover a 10GB file by fetching it as a Blob.
+  if(Number.isFinite(bytes) && bytes>0 && bytes<=SMALL_MEDIA_BYTES) {
+    const blob=await privateMediaBlob(id);
+    if(session!==mediaScope())throw new Error('로그인 정보가 변경됐습니다. 다시 시도하세요.');
+    return {blob};
+  }
+  const ticket=await api('/api/media/'+id+'/ticket','POST',{download});
+  if(session!==mediaScope())throw new Error('로그인 정보가 변경됐습니다. 다시 시도하세요.');
+  return {url:checkedMediaTicketUrl(id,ticket.url)};
+}
+async function attachMedia(audio, id, bytes) {
+  const session=mediaScope(), source=await privateMediaSource(id,bytes);
   if (!csrf || session !== mediaScope() || !audio.isConnected) return false;
   releaseAudio(audio);
-  const url = URL.createObjectURL(blob); mediaUrls.set(audio, url);
-  audio.src = url; audio.hidden = false;
+  const url=source.blob?URL.createObjectURL(source.blob):source.url;
+  mediaUrls.set(audio,url);audio.preload='metadata';audio.src=url;audio.hidden=false;
+  audio.onerror=()=>{if(session===mediaScope() && audio.isConnected)toast(audio.error?.code===2
+    ?'미리듣기 연결이 끊겼거나 유효 시간이 지났습니다. ‘내 기기에서 듣기’를 다시 눌러주세요.'
+    :'브라우저에서 이 파일의 소리를 재생하지 못했습니다. Discord 재생을 이용해주세요. 업로드한 파일은 보관됩니다.',true);};
   return true;
 }
-async function loadEditorPreview(id, ticket) {
-  const session = mediaScope(), blob = await privateMediaBlob(id);
+async function loadEditorPreview(id, ticket, bytes, localFile) {
+  const session=mediaScope();
+  const source=localFile?{blob:localFile}:await privateMediaSource(id,bytes);
   if (ticket !== uploadTicket || !csrf || session !== mediaScope()) return;
   const audio = $('#upload-preview'); releaseAudio(audio);
-  const url = URL.createObjectURL(blob); mediaUrls.set(audio, url); audio.src = url; audio.hidden = false;
+  const url=source.blob?URL.createObjectURL(source.blob):source.url;
+  mediaUrls.set(audio,url);audio.preload='metadata';audio.src=url;audio.hidden=false;
+  audio.onerror=()=>{if(ticket===uploadTicket && session===mediaScope())$('#upload-status').textContent='파일은 보관되었습니다. 이 브라우저에서 미리듣기를 지원하지 않는 형식입니다. 재생 구간을 입력해 저장한 뒤 Discord에서 재생하세요.';};
 }
-async function downloadFile(path, filename) {
+async function downloadFile(path, filename, bytes) {
   const session = mediaScope();
   const media = /^\/api\/media\/([a-f0-9]{32})(?:\?download=1)?$/.exec(path);
-  const blob = media ? await privateMediaBlob(media[1]) : await request(path, 'GET', undefined, true);
+  let source;
+  if(media)source=await privateMediaSource(media[1],bytes,true);
+  else if(path==='/api/backup'){
+    const ticket=await api('/api/backup/ticket','POST',{});
+    source={url:checkedDownloadTicketUrl('/api/backup',ticket.url)};
+  }else source={blob:await request(path,'GET',undefined,true)};
   if (!csrf || session !== mediaScope()) return;
-  const url = URL.createObjectURL(blob), link = document.createElement('a');
-  downloadUrls.add(url);
-  link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
-  setTimeout(() => { URL.revokeObjectURL(url); downloadUrls.delete(url); }, 1000);
+  const url=source.blob?URL.createObjectURL(source.blob):source.url, link=document.createElement('a');
+  if(source.blob)downloadUrls.add(url);
+  link.href=url;link.download=filename;link.rel='noopener';link.referrerPolicy='no-referrer';
+  if(!source.blob)link.target='_blank';
+  document.body.append(link);link.click();link.remove();
+  if(source.blob)setTimeout(()=>{URL.revokeObjectURL(url);downloadUrls.delete(url);},1000);
 }
 async function exportBackup() { return downloadFile('/api/export','song-metadata-backup.json'); }
 async function run(button, fn) {
@@ -342,6 +383,7 @@ async function control(action, extra = {}, message = '') {
   return result;
 }
 function setSource(value) {
+  if(value!=='upload' && uploading)cancelUploadJobs('song');
   source = value;
   $('#source-youtube').classList.toggle('selected', value === 'youtube');
   $('#source-upload').classList.toggle('selected', value === 'upload');
@@ -351,6 +393,7 @@ function setSource(value) {
   if (value !== 'upload') $('#upload-preview').pause();
 }
 function resetEditor() {
+  cancelUploadJobs();discardPendingSongUpload();discardEventUploadDraft(eventDraft);
   uploadTicket++; uploading = false; assetId = ''; editingName = null;
   $('#song-form').reset(); $('#song-name').readOnly = false;
   $('#editor-title').textContent = '새 '+categoryNames[currentCategory]+' 등록';
@@ -358,6 +401,7 @@ function resetEditor() {
   $('#save-song').textContent = '＋ '+categoryNames[currentCategory]+' 저장'; $('#save-song').disabled = false;
   $('#song-file').disabled = state?.fileStorage?.uploadsAllowed===false; $('#upload-name').textContent = '선택된 파일 없음';
   $('#upload-progress').hidden = true;
+  $('#upload-status').textContent='';$('#cancel-song-upload').hidden=true;$('#retry-song-upload').hidden=true;
   const audio = $('#upload-preview'); releaseAudio(audio); audio.hidden = true;
   setSource('youtube');
 }
@@ -375,54 +419,219 @@ async function editSong(song) {
   $('#editor-title').textContent = categoryNames[currentCategory]+' 수정'; $('#save-song').textContent = '변경 내용 저장';
   if (assetId) {
     $('#upload-name').textContent = song.fileMissing ? '파일 없음 · 다시 업로드하세요' : (song.filename || '등록된 오디오');
-    if (!song.fileMissing) { try { await loadEditorPreview(assetId, uploadTicket); } catch(err) { toast(err.message,true); } }
+    if (!song.fileMissing) { try { await loadEditorPreview(assetId, uploadTicket,song.assetBytes); } catch(err) { toast(err.message,true); } }
   }
   $('#song-form').scrollIntoView({behavior:'smooth', block:'center'});
 }
-async function uploadFile(file, onProgress) {
-  if (!file) throw new Error('오디오 파일을 선택하세요.');
-  if(state?.fileStorage?.uploadsAllowed===false)throw new Error(state.fileStorage.message);
-  const limit = (state?.maxUploadMb || 25) * 1024 * 1024;
-  if (file.size > limit) throw new Error(`파일은 최대 ${state?.maxUploadMb || 25}MB입니다.`);
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest(); xhr.open('POST',apiUrl('/api/upload')); xhr.timeout = 180000;
-    xhr.withCredentials = false;
-    xhr.setRequestHeader('Authorization', 'Bearer ' + accessToken);
-    xhr.setRequestHeader('X-CSRF-Token', csrf);
-    xhr.upload.onprogress = (e) => { if (onProgress && e.lengthComputable) onProgress(Math.round(e.loaded / e.total * 100)); };
-    xhr.onerror = () => reject(new Error('업로드 연결이 끊겼습니다. 다시 시도하세요.'));
-    xhr.ontimeout = () => reject(new Error('업로드 시간이 초과됐습니다. 더 작은 파일로 시도하세요.'));
-    xhr.onload = () => {
-      let d; try { d = JSON.parse(xhr.responseText); } catch { reject(new Error('업로드 응답이 잘못됐습니다.')); return; }
-      if (xhr.status === 401) showLogin();
-      if (xhr.status >= 200 && xhr.status < 300) resolve(d);
-      else reject(new Error(d.error || '파일 업로드 실패'));
-    };
-    const data = new FormData(); data.append('file', file); xhr.send(data);
+const UPLOAD_CHUNK_BYTES=4*1024*1024, DEFAULT_UPLOAD_MB=10240;
+const activeUploads=new Set();let uploadEpoch=0,pendingSongUpload=null;
+function uploadAbortError() { const error=new Error('업로드를 취소했습니다.');error.name='AbortError';return error; }
+function uploadDelay(ms,signal) {
+  return new Promise((resolve,reject)=>{
+    if(signal?.aborted){reject(uploadAbortError());return;}
+    const done=()=>{signal?.removeEventListener('abort',abort);resolve();};
+    const timer=setTimeout(done,ms);
+    const abort=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(uploadAbortError());};
+    signal?.addEventListener('abort',abort,{once:true});
   });
 }
-async function selectSongFile(file) {
+function formatUploadBytes(bytes) {
+  return bytes>=1024*1024*1024?(bytes/(1024*1024*1024)).toFixed(2)+'GB':bytes>=1024*1024?(bytes/(1024*1024)).toFixed(2)+'MB':Math.round(bytes/1024)+'KB';
+}
+function uploadLimitLabel(mb=DEFAULT_UPLOAD_MB) {
+  return mb>=1024?`${Number((mb/1024).toFixed(2))}GB (${mb}MB)`:`${mb}MB`;
+}
+function uploadProgressText(progress) {
+  if(progress.stage==='starting')return '업로드를 준비하고 있습니다…';
+  if(progress.stage==='processing')return '전송 완료 · 서버에서 오디오를 검사하고 있습니다…';
+  if(progress.stage==='complete')return '업로드와 오디오 검사를 완료했습니다.';
+  const bytes=`${formatUploadBytes(progress.loaded)} / ${formatUploadBytes(progress.total)} · ${progress.percent.toFixed(1)}%`;
+  if(progress.stage==='retrying')return `${bytes} · 연결 재시도 ${progress.retry}/5, 저장된 위치를 확인합니다…`;
+  const remaining=progress.remainingSeconds;
+  return bytes+(Number.isFinite(remaining)&&remaining>0?` · 남은 약 ${remaining>=60?Math.ceil(remaining/60)+'분':Math.ceil(remaining)+'초'}`:'');
+}
+function newUploadRequestId() {
+  if(globalThis.crypto?.randomUUID)return crypto.randomUUID().replace(/-/g,'');
+  if(globalThis.crypto?.getRandomValues){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('');}
+  throw new Error('안전한 업로드를 위해 HTTPS 웹사이트에서 다시 접속하세요.');
+}
+// Pure, injectable state machine: one 4MiB slice and one request at a time.
+// On a lost response, ask the server for its committed offset before retrying.
+async function uploadChunkedFile(file,{send,signal,onProgress=()=>{},onSession=()=>{},resumeId='',requestId=newUploadRequestId(),maxBytes=DEFAULT_UPLOAD_MB*1024*1024,chunkBytes=UPLOAD_CHUNK_BYTES,sleep=uploadDelay,now=Date.now}) {
+  if(!file || !Number.isSafeInteger(file.size) || file.size<=0 || typeof file.slice!=='function')throw new Error('비어 있지 않은 오디오 또는 MP4 파일을 선택하세요.');
+  if(!/\.(mp3|wav|ogg|m4a|flac|aac|opus|webm|mp4)$/i.test(file.name))throw new Error('MP3 · WAV · M4A · OGG · FLAC · AAC · OPUS · WEBM · MP4 파일을 선택하세요.');
+  if(file.size>maxBytes)throw new Error(`파일은 최대 ${uploadLimitLabel(maxBytes/(1024*1024))}입니다.`);
+  if(!/^[a-f0-9]{32}$/.test(requestId))throw new Error('업로드 요청 ID가 올바르지 않습니다. 파일을 다시 선택하세요.');
+  if(!Number.isSafeInteger(chunkBytes) || chunkBytes<=0)chunkBytes=UPLOAD_CHUNK_BYTES;
+  let id=resumeId,offset=0,failures=0,started=now(),initialOffset=0,currentStatus;
+  const check=()=>{if(signal?.aborted)throw uploadAbortError();};
+  const emit=(stage,loaded=offset,retry=0)=>{
+    check();const elapsed=Math.max(0,(now()-started)/1000),sent=Math.max(0,loaded-initialOffset);
+    onProgress({stage,loaded,total:file.size,confirmed:offset,percent:Math.min(100,loaded/file.size*100),retry,
+      remainingSeconds:elapsed>1&&sent>0?(file.size-loaded)/(sent/elapsed):null});
+  };
+  const accept=status=>{
+    if(!status || typeof status.id!=='string' || !status.id || status.size!==file.size || !Number.isSafeInteger(status.offset)
+      || status.offset<0 || status.offset>file.size || (id && status.id!==id)
+      || !['uploading','processing','complete','error'].includes(status.status))throw new Error('업로드 상태 응답이 올바르지 않습니다.');
+    if(status.status==='error'){const error=new Error(status.error || '오디오 검사에 실패했습니다. 다른 파일을 선택하세요.');error.processingError=true;throw error;}
+    id=status.id;offset=status.offset;
+    if(Number.isSafeInteger(status.chunkSize)&&status.chunkSize>0)chunkBytes=Math.min(UPLOAD_CHUNK_BYTES,chunkBytes,status.chunkSize);
+    onSession(id);return status;
+  };
+  const path=()=>'/api/uploads/'+encodeURIComponent(id);
+  const recover=async error=>{
+    if(error.name==='AbortError' || !error.retryable || ++failures>5)throw error;
+    emit('retrying',offset,failures);await sleep(Math.min(15000,1000*2**(failures-1)),signal);check();
+    // A chunk may already be committed although its response was lost.
+    for(;;){
+      try{return accept(await send(path(),'GET',undefined,{signal}));}
+      catch(next){if(next.name==='AbortError' || !next.retryable || ++failures>5)throw next;
+        emit('retrying',offset,failures);await sleep(Math.min(15000,1000*2**(failures-1)),signal);check();}
+    }
+  };
+  try {
+    check();emit('starting');
+    let startFailures=0;
+    for(;;){
+      check();
+      try{currentStatus=accept(await send(resumeId?path():'/api/uploads',resumeId?'GET':'POST',resumeId?undefined:{filename:file.name,size:file.size,requestId},{signal}));break;}
+      catch(error){
+        if(error.name==='AbortError' || !error.retryable || ++startFailures>5)throw error;
+        emit('retrying',0,startFailures);await sleep(Math.min(15000,1000*2**(startFailures-1)),signal);
+      }
+    }
+    initialOffset=offset;started=now();
+    while(currentStatus.status==='uploading' && offset<file.size) {
+      check();const start=offset,end=Math.min(file.size,start+Math.min(chunkBytes,UPLOAD_CHUNK_BYTES));
+      try {
+        const next=await send(path()+'?offset='+start,'PUT',file.slice(start,end),{signal,raw:true,onProgress:loaded=>emit('uploading',Math.min(end,start+loaded))});
+        check();currentStatus=accept(next);
+        if(offset<=start)throw new Error('서버에 업로드한 부분이 저장되지 않았습니다. 다시 시도하세요.');
+        failures=0;emit('uploading');
+      } catch(error) { currentStatus=await recover(error); }
+    }
+    const processingStarted=now();
+    for(;;) {
+      check();
+      if(currentStatus.status==='complete') {
+        if(!currentStatus.result?.id || offset!==file.size)throw new Error('업로드 완료 응답이 올바르지 않습니다.');
+        emit('complete');return currentStatus.result;
+      }
+      if(now()-processingStarted>30*60*1000){const error=new Error('서버 오디오 검사 응답을 기다리는 중입니다. 잠시 후 ‘남은 부분 다시 올리기’를 눌러 상태를 확인하세요.');error.retryable=true;throw error;}
+      emit('processing');
+      try {
+        if(currentStatus.status==='uploading') {
+          if(offset!==file.size)throw new Error('파일 전송이 끝나지 않았습니다. 다시 시도하세요.');
+          currentStatus=accept(await send(path()+'/complete','POST',{}, {signal}));
+        } else {
+          await sleep(1500,signal);check();currentStatus=accept(await send(path(),'GET',undefined,{signal}));
+        }
+        failures=0;
+      } catch(error) { currentStatus=await recover(error); }
+    }
+  } catch(error) {
+    error.uploadId=id;error.requestId=requestId;error.resumeAllowed=(!!id || !!requestId) && error.name!=='AbortError' && !!error.retryable && !error.processingError;
+    throw error;
+  }
+}
+function uploadSnapshot() { return {apiBase,token:accessToken,csrf,team:selectedTeam,guild:selectedGuild,bot:selectedBot,category:currentCategory,epoch:uploadEpoch}; }
+function currentUploadSnapshot(snapshot) {
+  return canEditMusic() && !!csrf && snapshot.apiBase===apiBase && snapshot.token===accessToken && snapshot.csrf===csrf
+    && snapshot.team===selectedTeam && snapshot.guild===selectedGuild && snapshot.bot===selectedBot
+    && snapshot.category===currentCategory && snapshot.epoch===uploadEpoch;
+}
+function uploadTransport(path,method,data,{signal,onProgress,raw=false,timeout}={},snapshot=uploadSnapshot()) {
+  return new Promise((resolve,reject)=>{
+    if(signal?.aborted){reject(uploadAbortError());return;}
+    const xhr=new XMLHttpRequest();xhr.open(method,snapshot.apiBase+path);xhr.timeout=timeout || (raw?180000:60000);xhr.withCredentials=false;
+    xhr.setRequestHeader('Authorization','Bearer '+snapshot.token);if(method!=='GET')xhr.setRequestHeader('X-CSRF-Token',snapshot.csrf);
+    if(data!==undefined)xhr.setRequestHeader('Content-Type',raw?'application/octet-stream':'application/json');
+    const finish=(fn,value)=>{signal?.removeEventListener('abort',abort);fn(value);};
+    const fail=(message,status=0)=>{const error=new Error(message);error.status=status;error.retryable=!status || [408,409,425,429].includes(status) || status>=500;finish(reject,error);};
+    const abort=()=>xhr.abort();signal?.addEventListener('abort',abort,{once:true});
+    xhr.upload.onprogress=event=>{if(onProgress && event.lengthComputable && !signal?.aborted)onProgress(Math.min(event.loaded,data?.size || event.total));};
+    xhr.onerror=()=>fail('업로드 연결이 끊겼습니다. 남은 부분을 이어서 올릴 수 있습니다.');
+    xhr.ontimeout=()=>fail('업로드 응답 시간이 초과됐습니다. 저장된 위치에서 다시 시도합니다.');
+    xhr.onabort=()=>finish(reject,uploadAbortError());
+    xhr.onload=()=>{
+      let result;try{result=JSON.parse(xhr.responseText);}catch{fail('업로드 서버 응답이 올바르지 않습니다.',xhr.status>=400?xhr.status:400);return;}
+      if(xhr.status===401 && snapshot.token===accessToken && snapshot.csrf===csrf)showLogin();
+      if(xhr.status>=200&&xhr.status<300)finish(resolve,result);
+      else fail(result.error || (xhr.status===404?'대용량 업로드 서버를 먼저 업데이트해주세요.':'파일 업로드 실패'),xhr.status);
+    };
+    try{xhr.send(data===undefined?null:raw?data:JSON.stringify(data));}catch(error){signal?.removeEventListener('abort',abort);reject(error);}
+  });
+}
+function discardUpload(id,snapshot) {
+  if(id && snapshot?.token)void uploadTransport('/api/uploads/'+encodeURIComponent(id),'DELETE',undefined,{timeout:15000},snapshot).catch(()=>{});
+}
+function cancelUploadJobs(kind) {
+  if(!kind)uploadEpoch++;
+  for(const job of activeUploads)if(!kind || job.kind===kind){job.controller.abort();discardUpload(job.id,job.snapshot);}
+}
+function discardPendingSongUpload() {
+  if(pendingSongUpload)discardUpload(pendingSongUpload.resumeId,pendingSongUpload.snapshot);
+  pendingSongUpload=null;
+}
+function discardEventUploadDraft(draft) {
+  if(!draft)return;
+  for(const item of [...(draft.pendingFiles || []),...(draft.uploadQueue || [])])discardUpload(item.resumeId,item.snapshot);
+  draft.pendingFiles=[];draft.uploadQueue=[];
+}
+async function uploadFile(file,onProgress,options={}) {
+  if(!canEditMusic())throw new Error('등록/삭제자 이상 권한이 필요합니다.');
+  if(state?.fileStorage?.uploadsAllowed===false)throw new Error(state.fileStorage.message);
+  const snapshot=options.snapshot || uploadSnapshot(),controller=new AbortController();
+  if(!currentUploadSnapshot(snapshot))throw uploadAbortError();
+  const job={controller,snapshot,id:options.resumeId || '',kind:options.kind || 'song'};activeUploads.add(job);
+  const current=()=>currentUploadSnapshot(snapshot) && (!options.isCurrent || options.isCurrent());
+  const send=async(path,method,data,settings)=>{
+    if(!current()){controller.abort();throw uploadAbortError();}
+    const result=await uploadTransport(path,method,data,settings,snapshot);
+    if(!current()){controller.abort();throw uploadAbortError();}return result;
+  };
+  try{return await uploadChunkedFile(file,{send,signal:controller.signal,resumeId:options.resumeId,requestId:options.requestId,
+    maxBytes:(state?.maxUploadMb || DEFAULT_UPLOAD_MB)*1024*1024,chunkBytes:Math.min(state?.uploadChunkBytes || UPLOAD_CHUNK_BYTES,UPLOAD_CHUNK_BYTES),
+    onSession:id=>{job.id=id;},onProgress:progress=>{if(current())onProgress?.(progress);}});}
+  catch(error){if(!error.resumeAllowed || error.name==='AbortError')discardUpload(job.id,snapshot);throw error;}
+  finally{activeUploads.delete(job);}
+}
+async function selectSongFile(file,resume) {
   if (uploading) { toast('현재 파일을 업로드하고 있습니다.'); return; }
+  if(!resume)discardPendingSongUpload();
   const ticket = ++uploadTicket;
+  const snapshot=resume?.snapshot || uploadSnapshot();
   uploading = true; $('#save-song').disabled = true; $('#song-file').disabled = true;
   $('#upload-progress').hidden = false; $('#upload-progress').value = 0;
-  $('#upload-name').textContent = '파일 업로드 및 오디오 검사 중…';
+  $('#upload-name').textContent=file.name;
+  $('#cancel-song-upload').hidden=false;$('#retry-song-upload').hidden=true;
+  $('#upload-status').textContent='업로드 준비 중…';
   try {
-    const result = await uploadFile(file, p => { if (ticket === uploadTicket) $('#upload-progress').value = p; });
+    const result = await uploadFile(file,progress=>{if(ticket===uploadTicket){$('#upload-progress').value=progress.percent;$('#upload-status').textContent=uploadProgressText(progress);}},
+      {resumeId:resume?.resumeId,requestId:resume?.requestId,snapshot,isCurrent:()=>ticket===uploadTicket});
     if (ticket !== uploadTicket) return;
-    assetId = result.id;
+    assetId = result.id;pendingSongUpload=null;
     $('#upload-name').textContent = `${result.name} · ${fmt(result.duration)}`;
-    await loadEditorPreview(assetId, ticket);
+    await loadEditorPreview(assetId,ticket,result.bytes ?? result.size,file);
     if (ticket !== uploadTicket) return;
     $('#song-start').value = '0:00'; $('#song-end').value = fmt(Math.min(currentCategory==='entrance'?30:3600, Math.floor(result.duration * 100) / 100));
     if (!$('#song-name').value) $('#song-name').value = file.name.replace(/\.[^.]+$/, '').slice(0,64);
     toast('파일 업로드 완료! 재생 구간을 확인하고 '+categoryNames[currentCategory]+'를 저장하세요.');
   } catch (err) {
-    if (ticket === uploadTicket) { assetId=''; $('#upload-name').textContent = '업로드 실패 · 다시 선택하세요'; toast(err.message, true); }
+    if (ticket === uploadTicket) {
+      assetId='';pendingSongUpload=err.resumeAllowed&&currentUploadSnapshot(snapshot)?{file,resumeId:err.uploadId || '',requestId:err.requestId,snapshot}:null;
+      $('#upload-status').textContent=err.name==='AbortError'?'업로드를 취소했습니다.':err.message;
+      $('#retry-song-upload').hidden=!pendingSongUpload;
+      $('#retry-song-upload').textContent=pendingSongUpload?.resumeId?'남은 부분 다시 올리기':'다시 올리기';
+      if(err.name!=='AbortError')toast(err.message,true);
+    }
   } finally {
-    if (ticket === uploadTicket) { uploading=false; $('#save-song').disabled=false; $('#song-file').disabled=state?.fileStorage?.uploadsAllowed===false; $('#upload-progress').hidden=true; }
+    if (ticket === uploadTicket) { uploading=false; $('#save-song').disabled=false; $('#song-file').disabled=state?.fileStorage?.uploadsAllowed===false; $('#upload-progress').hidden=true;$('#cancel-song-upload').hidden=true; }
   }
 }
+$('#cancel-song-upload').addEventListener('click',()=>{cancelUploadJobs('song');discardPendingSongUpload();});
+$('#retry-song-upload').addEventListener('click',()=>{const pending=pendingSongUpload;if(pending)void selectSongFile(pending.file,pending);});
 function drawLive(s) {
   const voice = s.voice;
   $('#sidebar-dot').classList.toggle('online', s.ready);
@@ -489,7 +698,7 @@ async function loadState(full = true) {
     if (s.activeTeam !== selectedTeam) notes.push(`${s.botLabel || '선택한 봇'}의 현재 경기 팀은 “${s.activeTeam}”입니다. 팀을 바꾸려면 “이 봇의 경기 팀으로 설정”을 누르세요.`);
     if (s.otherBotVoice) notes.push(`${s.otherBotVoice.botLabel || '다른 봇'}이 “${s.otherBotVoice.channelName}” 통화방을 사용 중입니다. 선택한 봇은 같은 통화방에 들어갈 수 없습니다.`);
     $('#workspace-note').hidden = !notes.length; $('#workspace-note').textContent = notes.join(' ');
-    $('#upload-limit').textContent = `MP3 · WAV · M4A · OGG · 최대 ${s.maxUploadMb}MB`;
+    $('#upload-limit').textContent = `MP3 · WAV · M4A · OGG · MP4 등 · 파일당 최대 ${uploadLimitLabel(s.maxUploadMb || DEFAULT_UPLOAD_MB)}`;
     updateCategory(); renderSongs(); renderLineup(); renderEvents(); applyRole();
   } finally {
     stateLoads--;
@@ -523,15 +732,16 @@ function renderSongs() {
     if(canPlay()) actions.append(bindButton('통화방 5초','ghost',()=>control('play',{name:song.name,category,preview:true})));
     if (canEditMusic()) actions.append(bindButton('수정','ghost',()=>editSong(song)));
     if (song.source === 'upload' && !song.fileMissing) {
-      actions.append(bindButton('원본 다운로드','ghost',()=>downloadFile('/api/media/'+encodeURIComponent(song.assetId)+'?download=1',song.filename || 'audio')));
+      actions.append(bindButton('원본 다운로드','ghost',()=>downloadFile('/api/media/'+encodeURIComponent(song.assetId)+'?download=1',song.filename || 'audio',song.assetBytes)));
       actions.append(bindButton('내 기기에서 듣기','ghost',async()=>{
         const ticket = ++previewTicket;
         if (previewAudio) releaseAudio(previewAudio);
         let audio = row.querySelector('audio');
         if (!audio) { audio = el('audio'); audio.controls=true; audio.preload='metadata'; row.append(audio); }
-        if (!await attachMedia(audio, song.assetId)) return;
+        if (!await attachMedia(audio, song.assetId,song.assetBytes)) return;
         if (ticket !== previewTicket) { releaseAudio(audio); return; }
-        audio.currentTime = timeValue(song.start);
+        const seek=()=>{if(ticket===previewTicket)audio.currentTime=timeValue(song.start);};
+        if(audio.readyState>=1)seek();else audio.onloadedmetadata=seek;
         audio.ontimeupdate = ()=>{ if (audio.currentTime >= timeValue(song.end)) audio.pause(); };
         previewAudio=audio; await audio.play();
       }));
@@ -743,13 +953,14 @@ const eventDialog=$('#event-editor-dialog');
 function closeEventEditor(){
   if(eventDraft?.busy)return;
   if(eventDraft?.dirty && !confirm('저장하지 않은 변경사항을 닫을까요? 업로드 원본은 서버에 남지만 상황 연결은 저장되지 않습니다.'))return;
+  discardEventUploadDraft(eventDraft);
   eventDialog.close();eventDraft=null;
 }
 eventDialog.addEventListener('cancel',e=>{e.preventDefault();closeEventEditor();});
 function openEventEditor(event){
   if(!canEditMusic())return;
   const library=Object.entries(categoryNames).flatMap(([category])=>categorySongs(category).map(s=>({type:'song',category,songName:s.name})));
-  eventDraft={team:selectedTeam,key:event.key,label:event.label,customEvent:!!event.customEvent,tracks:eventTracks(event),
+  eventDraft={team:selectedTeam,key:event.key,label:event.label,customEvent:!!event.customEvent,tracks:eventTracks(event),snapshot:uploadSnapshot(),pendingFiles:[],
     playMode:event.custom?.playMode || 'single',library,selected:new Set(),dirty:false,busy:false,
     max:state.maxEventTracks || 100,uploadsAllowed:state.fileStorage?.uploadsAllowed!==false};
   const box=$('#event-editor-content');box.replaceChildren();
@@ -789,14 +1000,18 @@ function openEventEditor(event){
     eventDraft.tracks=[];eventDraft.dirty=true;renderEventDraftList();renderEventChoices();
   });right.append(clear);
   const drop=el('div',null,'event-file-drop');drop.id='event-file-drop';
-  const fileLabel=el('label','여러 오디오 파일을 여기에 놓거나 선택하세요'),file=el('input');
-  file.type='file';file.multiple=true;file.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm';file.id='event-files';file.disabled=!eventDraft.uploadsAllowed;
+  const fileLabel=el('label','여러 오디오 또는 MP4 파일을 여기에 놓거나 선택하세요'),file=el('input');
+  file.type='file';file.multiple=true;file.accept='.mp3,.wav,.ogg,.m4a,.flac,.aac,.opus,.webm,.mp4';file.id='event-files';file.disabled=!eventDraft.uploadsAllowed;
   file.addEventListener('change',()=>{const files=Array.from(file.files);file.value='';run(null,()=>uploadEventFiles(files));});
-  fileLabel.append(file);drop.append(fileLabel,el('p','여러 파일을 한 번에 업로드한 뒤 아래 ‘변경사항 저장’을 눌러주세요.','tiny'));
+  fileLabel.append(file);drop.append(fileLabel,el('p',`파일당 최대 ${uploadLimitLabel(state?.maxUploadMb || DEFAULT_UPLOAD_MB)}. MP4는 소리를 사용합니다. 업로드 후 아래 ‘변경사항 저장’을 눌러주세요.`,'tiny'));
   for(const type of ['dragenter','dragover'])drop.addEventListener(type,e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files'))drop.classList.add('dragging');});
   for(const type of ['dragleave','drop'])drop.addEventListener(type,e=>{e.preventDefault();drop.classList.remove('dragging');});
   drop.addEventListener('drop',e=>{if(e.dataTransfer.files.length)run(null,()=>uploadEventFiles(Array.from(e.dataTransfer.files)));});
   const progress=el('progress');progress.id='event-upload-progress';progress.max=100;progress.hidden=true;drop.append(progress);
+  const uploadActions=el('div',null,'upload-actions');
+  const cancelUpload=bindButton('업로드 취소','ghost',()=>{if(eventDraft){eventDraft.cancelUploads=true;discardEventUploadDraft(eventDraft);}cancelUploadJobs('event');});cancelUpload.id='cancel-event-upload';cancelUpload.hidden=true;
+  const retryUpload=bindButton('실패한 파일 이어 올리기','soft',()=>uploadEventFiles(eventDraft?.pendingFiles || []));retryUpload.id='retry-event-upload';retryUpload.hidden=true;
+  uploadActions.append(cancelUpload,retryUpload);drop.append(uploadActions);
   const status=el('p',eventDraft.uploadsAllowed?'':'서버 영구 저장소가 없어 업로드가 차단되었습니다.','tiny');status.id='event-upload-status';status.setAttribute('role','status');drop.append(status);right.append(drop);panes.append(right);box.append(panes);
   const footer=el('div',null,'event-editor-footer');footer.append(el('p','추가·빼기·순서 변경은 저장 후 적용됩니다. 순서 재생은 버튼을 누를 때마다 다음 1곡을 재생합니다.','tiny'));
   const save=bindButton('변경사항 저장','primary',saveEventDraft);save.id='save-event-draft';footer.append(save);box.append(footer);
@@ -855,38 +1070,54 @@ function renderEventDraftList(){
 function setEventEditorBusy(busy){
   if(!eventDraft)return;eventDraft.busy=busy;
   $$('#event-editor-dialog button, #event-editor-dialog input, #event-editor-dialog select').forEach(n=>n.disabled=busy);
+  if(busy && $('#cancel-event-upload'))$('#cancel-event-upload').disabled=false;
   if(!busy){$('#event-files').disabled=!eventDraft.uploadsAllowed;renderEventDraftList();renderEventChoices();}
 }
 async function uploadEventFiles(files){
   const draft=eventDraft;if(!draft || draft.busy || !files.length)return;
   if(!draft.uploadsAllowed)throw new Error('서버의 영구 저장소를 확인해주세요.');
+  if(!currentUploadSnapshot(draft.snapshot))throw new Error('선택한 팀이 변경됐습니다. 경기 사운드 편집창을 다시 열어주세요.');
   if(draft.tracks.length+files.length>draft.max)throw new Error(`최대 ${draft.max}곡입니다. 현재 ${draft.tracks.length}곡, 선택 ${files.length}개입니다.`);
-  const bad=files.find(f=>! /\.(mp3|wav|ogg|m4a|flac|aac|opus|webm)$/i.test(f.name));
-  if(bad)throw new Error('지원하지 않는 파일: '+bad.name);
+  const pending=files.map(item=>item.file?item:{file:item,snapshot:draft.snapshot});
+  const bad=pending.find(item=>! /\.(mp3|wav|ogg|m4a|flac|aac|opus|webm|mp4)$/i.test(item.file.name));
+  if(bad)throw new Error('지원하지 않는 파일: '+bad.file.name+' · 오디오 또는 MP4 파일을 선택하세요.');
+  const isCurrent=()=>eventDraft===draft && currentUploadSnapshot(draft.snapshot);
+  for(const old of draft.pendingFiles || [])if(!pending.some(item=>item.resumeId && item.resumeId===old.resumeId))discardUpload(old.resumeId,old.snapshot);
+  draft.cancelUploads=false;draft.pendingFiles=[];draft.uploadQueue=pending;
   setEventEditorBusy(true);const status=$('#event-upload-status'),progress=$('#event-upload-progress');progress.hidden=false;
+  $('#cancel-event-upload').hidden=false;$('#retry-event-upload').hidden=true;
+  const totalBytes=pending.reduce((sum,item)=>sum+item.file.size,0);let processedBytes=0;
   let success=0;const errors=[];
   try{
-    for(let i=0;i<files.length;i++){
-      if(eventDraft!==draft || !csrf)break;
-      const file=files[i];status.textContent=`${i+1}/${files.length} 업로드 · ${file.name}`;
+    for(let i=0;i<pending.length;i++){
+      if(!isCurrent() || draft.cancelUploads)break;
+      const item=pending[i],file=item.file;status.textContent=`${i+1}/${pending.length} 업로드 · ${file.name}`;
       try{
-        const result=await uploadFile(file,value=>{progress.value=(i+value/100)/files.length*100;});
-        if(eventDraft!==draft || !csrf)break;
-        draft.tracks.push({type:'asset',assetId:result.id,filename:result.name || file.name});draft.dirty=true;success++;
-      }catch(err){errors.push(`${file.name}: ${err.message}`);}
-      progress.value=(i+1)/files.length*100;
+        const result=await uploadFile(file,value=>{if(isCurrent()){progress.value=(processedBytes+value.loaded)/totalBytes*100;status.textContent=`${i+1}/${pending.length} · ${file.name}\n${uploadProgressText(value)}`;}},
+          {kind:'event',resumeId:item.resumeId,requestId:item.requestId,snapshot:draft.snapshot,isCurrent});
+        if(!isCurrent() || draft.cancelUploads)break;
+        draft.tracks.push({type:'asset',assetId:result.id,filename:result.name || file.name});draft.dirty=true;success++;processedBytes+=file.size;
+      }catch(err){
+        if(!isCurrent() || err.name==='AbortError')break;
+        errors.push(`${file.name}: ${err.message}`);
+        if(err.resumeAllowed)draft.pendingFiles.push({file,resumeId:err.uploadId || '',requestId:err.requestId,snapshot:draft.snapshot});
+      }
     }
-    status.textContent=`${success}개 업로드 완료. ‘변경사항 저장’을 눌러 연결하세요.`+(errors.length?` 실패 ${errors.length}개: ${errors.join(' / ')}`:'');
-    toast(errors.length?`${success}개 성공, ${errors.length}개 실패. 업로드 영역에서 상세 내용을 확인하세요.`:`${success}개 파일을 추가했습니다. 저장하면 적용됩니다.`,!!errors.length);
-  }finally{if(eventDraft===draft)setEventEditorBusy(false);}
+    if(!isCurrent())return;
+    status.textContent=(draft.cancelUploads?'업로드를 취소했습니다. ':'')+`${success}개 업로드 완료. ‘변경사항 저장’을 눌러 연결하세요.`+(errors.length?` 실패 ${errors.length}개: ${errors.join(' / ')}`:'');
+    $('#retry-event-upload').hidden=!draft.pendingFiles.length;
+    if(!draft.cancelUploads)toast(errors.length?`${success}개 성공, ${errors.length}개 실패. 업로드 영역에서 상세 내용을 확인하세요.`:`${success}개 파일을 추가했습니다. 저장하면 적용됩니다.`,!!errors.length);
+  }finally{draft.uploadQueue=[];if(eventDraft===draft){setEventEditorBusy(false);$('#cancel-event-upload').hidden=true;progress.hidden=true;}}
 }
 async function saveEventDraft(){
   const draft=eventDraft;if(!draft || draft.busy)return;
+  if(!currentUploadSnapshot(draft.snapshot))throw new Error('선택한 팀이나 로그인 정보가 변경됐습니다. 편집창을 다시 열어주세요.');
   if(draft.customEvent && !draft.label.trim())throw new Error('상황 이름을 입력하세요.');
   setEventEditorBusy(true);
   try{
     await api('/api/events','PUT',{team:draft.team,key:draft.key,tracks:draft.tracks,playMode:draft.playMode,...(draft.customEvent?{label:draft.label.trim()}:{})});
-    draft.dirty=false;eventDialog.close();eventDraft=null;await loadState();toast('경기 사운드와 재생 순서를 저장했습니다.');
+    if(eventDraft!==draft || !currentUploadSnapshot(draft.snapshot))return;
+    discardEventUploadDraft(draft);draft.dirty=false;eventDialog.close();eventDraft=null;await loadState();toast('경기 사운드와 재생 순서를 저장했습니다.');
   }finally{if(eventDraft===draft)setEventEditorBusy(false);}
 }
 
@@ -979,7 +1210,7 @@ $('#search').addEventListener('input',renderSongs);
 $('#source-youtube').addEventListener('click',()=>setSource('youtube'));
 $('#source-upload').addEventListener('click',()=>setSource('upload'));
 $('#reset-song').addEventListener('click',resetEditor);
-$('#song-file').addEventListener('change',()=>{if($('#song-file').files[0])selectSongFile($('#song-file').files[0]);});
+$('#song-file').addEventListener('change',()=>{const input=$('#song-file'),file=input.files[0];input.value='';if(file)selectSongFile(file);});
 const drop=$('#dropzone');
 for(const name of ['dragenter','dragover'])drop.addEventListener(name,e=>{e.preventDefault();drop.classList.add('dragging');});
 for(const name of ['dragleave','drop'])drop.addEventListener(name,e=>{e.preventDefault();drop.classList.remove('dragging');});
@@ -1032,7 +1263,7 @@ $('#event-create-form').addEventListener('submit',e=>{e.preventDefault();run(e.s
 });});
 $('#check-connection').addEventListener('click',()=>run($('#check-connection'),checkConnection));
 $('#export-backup').addEventListener('click',()=>run($('#export-backup'),exportBackup));
-$('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-backup'),async()=>{toast('음악 백업을 준비합니다. 파일이 많으면 시간이 걸릴 수 있어요.');await downloadFile('/api/backup','APPEARANCE-음악백업-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.zip');toast('백업 다운로드를 시작했습니다.');}));
+$('#export-audio-backup').addEventListener('click',()=>run($('#export-audio-backup'),async()=>{toast('음악 백업을 준비합니다. 파일이 많으면 시간이 걸릴 수 있어요.');await downloadFile('/api/backup','APPEARANCE-음악백업-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.zip');toast('백업 다운로드를 요청했습니다. 브라우저의 다운로드 상태를 확인하세요.');}));
 window.addEventListener('pagehide',clearMedia);
 $('#reload-users').addEventListener('click',()=>run($('#reload-users'),loadUsers));
 $('#reload-diagnostics').addEventListener('click',()=>run($('#reload-diagnostics'),diagnostics));
@@ -1050,4 +1281,4 @@ configureClient();
   catch(err){if(csrf)toast(err.message,true);else showLogin();}
 })();
 
-window.addEventListener('beforeunload',event=>{if(eventDraft?.dirty || eventDraft?.busy){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(uploading || pendingSongUpload || eventDraft?.dirty || eventDraft?.busy || eventDraft?.pendingFiles?.length){event.preventDefault();event.returnValue='';}});
