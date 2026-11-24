@@ -83,7 +83,10 @@ class Player:
         percent = saved_volume_percent(record)
         decoder = discord.FFmpegPCMAudio(str(target), executable=self.settings.ffmpeg,
                                         before_options=f'{before} -threads {self.settings.ffmpeg_threads}',
-                                        options=f'{options} -map 0:a:0 -threads {self.settings.ffmpeg_threads} -filter_threads 1')
+                                        # Keep FFmpeg's default/best audio selection.
+                                        # MP4's first audio can be an unused silent
+                                        # track; callers retain -vn to exclude video.
+                                        options=f'{options} -threads {self.settings.ffmpeg_threads} -filter_threads 1')
         if isinstance(getattr(decoder, '_process', None), subprocess.Popen):
             # FFmpeg can report an expired/blocked stream as EOF with no audio.
             # A weak reference avoids a retained decoder/read-closure cycle.

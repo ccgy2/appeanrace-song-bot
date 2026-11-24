@@ -1,12 +1,12 @@
-large-upload-mp4-20261124-1
+playback-audio-fix-20261124-2
 
-10GB + MP4 등록 / 기존 타순 권한 + 경기 사운드 정렬을 포함한 변경 파일 묶음입니다.
-기존 저장소의 같은 경로에 덮어쓰세요. 새 파일 upload_sessions.py도 반드시 추가하세요.
-Railway Variables: MAX_UPLOAD_MB=10240, MAX_STORAGE_MB=20480. 실제 Volume 여유 공간도 필요합니다.
-적용 안내: UPDATE_UPLOAD_10GB_MP4_20261124.md
-검증 결과: TEST_REPORT_UPLOAD_10GB_MP4_20261124.md
+무음 재생 수정 / 기존10GB·MP4 등록·타순 권한·경기 사운드 정렬을 포함한 변경 파일 묶음입니다.
+기존 GitHub 저장소의 같은 경로에 덮어쓰고 Railway 봇과 Firebase 웹사이트를 재배포하세요.
+핵심 수정: player.py의 첫 오디오 트랙 강제 선택 제거, voice.py 자체 음소거 복구, 실제 볼륨·상태 표시.
+새 필수 파일 upload_sessions.py도 포함합니다. DB·음원·비밀 설정은 포함하지 않습니다.
+적용·검증 안내: UPDATE_PLAYBACK_FIX_20261124.md
 
-총 40개 파일:
+총 46개 파일:
 .env.example
 ACCOUNT_SETUP.md
 CHANGED_FILES.txt
@@ -14,6 +14,7 @@ README.md
 TEST_REPORT_LINEUP_SOUND_ORDER_20261030.md
 TEST_REPORT_UPLOAD_10GB_MP4_20261124.md
 UPDATE_LINEUP_SOUND_ORDER_20261030.md
+UPDATE_PLAYBACK_FIX_20261124.md
 UPDATE_UPLOAD_10GB_MP4_20261124.md
 assets.py
 bot_patch/config.py
@@ -28,13 +29,18 @@ static/style.css
 static/sw.js
 tests/package-verification-20261030.json
 tests/package-verification-20261124.json
+tests/package-verification-playback-20261124.json
 tests/test_large_upload_api.py
 tests/test_lineup_permissions.py
+tests/test_playback_status.cjs
+tests/test_playback_stream_selection.py
 tests/test_resumable_frontend.cjs
 tests/test_studio_update.py
 tests/test_upload_sessions.py
+tests/test_voice_self_mute.py
 upload_sessions.py
 validation.py
+voice.py
 webapp.py
 웹사이트/ACCOUNT_SETUP.md
 웹사이트/README.md

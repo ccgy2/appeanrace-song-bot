@@ -111,6 +111,29 @@ class VoiceManager:
                 pass
         raise VoiceError('스테이지에 연결됐지만 청중 상태입니다. 관리자가 봇을 발언자로 전환한 뒤 다시 재생하세요. 자동 전환하려면 봇에 이 채널의 멤버 음소거(Mute Members) 권한을 허용하세요.')
 
+    async def ensure_self_unmuted(self, guild, channel):
+        """Clear only our own mute, then wait for the Gateway to confirm it."""
+        state = getattr(guild.me, 'voice', None)
+        if getattr(state, 'self_mute', False) is not True:
+            return
+        if not getattr(state, 'channel', None) or state.channel.id != channel.id:
+            raise VoiceError('봇의 현재 통화방 상태를 확인하지 못해 자체 음소거를 해제하지 않았습니다. 잠시 후 다시 재생하세요.')
+        try:
+            await asyncio.wait_for(guild.change_voice_state(
+                channel=channel, self_mute=False, self_deaf=bool(getattr(state, 'self_deaf', False))), timeout=8)
+        except discord.Forbidden:
+            raise VoiceError('Discord에서 봇의 자체 음소거 해제를 거부했습니다. 봇의 통화방 상태를 확인한 뒤 다시 재생하세요.') from None
+        except (asyncio.TimeoutError, TimeoutError):
+            raise VoiceError('봇의 자체 음소거 해제 요청 시간이 초과됐습니다. 잠시 후 다시 재생하세요.') from None
+        # Sending the Gateway request does not confirm that Discord applied it.
+        for _ in range(15):
+            current = getattr(guild.me, 'voice', None)
+            if (current and getattr(current, 'channel', None) and current.channel.id == channel.id
+                    and getattr(current, 'self_mute', None) is False):
+                return
+            await asyncio.sleep(.2)
+        raise VoiceError('봇의 자체 음소거 해제를 요청했지만 아직 확인되지 않았습니다. Discord에서 봇의 음소거 상태를 확인한 뒤 다시 재생하세요.')
+
     async def connect(self, guild, channel=None):
         async with self.lock(guild.id):
             channel = channel or (guild.voice_client.channel if guild.voice_client else None)
@@ -149,7 +172,8 @@ class VoiceManager:
                                 await asyncio.sleep(1)
                     if not vc:
                         raise VoiceError(self.explain(last)) from last
-                # Speaker errors must keep the connection so a stage moderator can promote us.
+                # Keep the connection available when a voice-state check needs manual correction.
+                await self.ensure_self_unmuted(guild, channel)
                 await self.ensure_stage_speaker(guild, channel)
                 self.errors.pop(guild.id, None)
                 return vc
@@ -174,6 +198,7 @@ class VoiceManager:
             'playing': bool(vc and vc.is_playing()),
             'paused': bool(vc and vc.is_paused()),
             'serverMuted': bool(state and state.mute),
+            'selfMuted': bool(state and getattr(state, 'self_mute', False) is True),
             'stage': bool(vc and vc.channel and vc.channel.type == discord.ChannelType.stage_voice),
             'stageAudience': bool(state and getattr(state, 'suppress', False) and vc and vc.channel and vc.channel.type == discord.ChannelType.stage_voice),
             'latencyMs': round(latency * 1000) if isinstance(latency, (int, float)) and math.isfinite(latency) else None,
